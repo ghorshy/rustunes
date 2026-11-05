@@ -507,13 +507,13 @@ pub fn read_snapshot_current_with_control(
         "Current SQLite OS page size exceeds storage profile"
     );
     ensure!(
-        fs::metadata(database)?.len() <= 32 * 1024 * 1024,
-        "Current catalogue database exceeds 32MiB"
+        fs::metadata(database)?.len() <= MAX_DATABASE_BYTES,
+        "Current catalogue database exceeds 64MiB"
     );
     if let Some(wal) = wal {
         ensure!(
-            fs::metadata(wal)?.len() <= 32 * 1024 * 1024,
-            "Current catalogue WAL exceeds 32MiB"
+            fs::metadata(wal)?.len() <= MAX_WAL_BYTES,
+            "Current catalogue WAL exceeds 256MiB"
         );
     }
     read_snapshot_checked_options(
@@ -548,8 +548,9 @@ enum SnapshotStorage {
 impl SnapshotStorage {
     fn input_limits(self) -> (u64, u64) {
         match self {
-            Self::Current => (32 * 1024 * 1024, 32 * 1024 * 1024),
-            Self::Legacy | Self::MemoryTemp => (MAX_DATABASE_BYTES, MAX_WAL_BYTES),
+            Self::Current | Self::Legacy | Self::MemoryTemp => {
+                (MAX_DATABASE_BYTES, MAX_WAL_BYTES)
+            }
         }
     }
     fn memory_temp(self) -> bool {
