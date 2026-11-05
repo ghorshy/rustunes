@@ -148,7 +148,7 @@ fn remaining(control: &super::super::transfer::CaptureControl) -> Duration {
 }
 fn reserve_frame(frames: &AtomicUsize) -> Result<()> {
     frames
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
             (value < MAX_FRAMES).then_some(value + 1)
         })
         .map(|_| ())
