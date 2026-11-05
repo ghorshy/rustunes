@@ -284,8 +284,9 @@ pub struct ArtworkInventory {
 }
 
 impl ArtworkInventory {
-    /// Union of canonical source300 IDs in BOTH artwork and artwork_token.
-    /// Historical cached IDs and other relation shapes are never omitted.
+    /// Source300 numeric IDs that could collide with allocated artwork IDs
+    /// (>=100) in BOTH artwork and artwork_token. Stale noncanonical IDs are
+    /// reserved by numeric value; reserved placeholders below 100 are ignored.
     pub fn occupied_cache_ids(&self) -> &BTreeSet<u32> {
         &self.occupied_cache_ids
     }
@@ -2015,9 +2016,10 @@ fn stats_fingerprints(
 
 // Only canonical source300 artwork cache IDs are usable as media artwork.
 // Apple's post-clear databases may retain reserved or noncanonical numeric
-// tokens after every music track has been removed. Keep their normalized u32
-// IDs occupied to avoid collisions, but never interpret them as live artwork.
-// If any music remains, retain the strict canonical requirement.
+// tokens, including the exact "0" sentinel after new tracks are inserted.
+// Keep uncanonical allocatable IDs (>=100) occupied to avoid reuse, but never
+// interpret these tokens as covers or track/album artwork registrations.
+// Apart from "0", a noncanonical token is accepted only for an empty library.
 fn cache_id(row: &Row<'_>, empty_music_library: bool) -> Result<(u32, bool)> {
     let ValueRef::Text(bytes) = row.get_ref("artwork_token")? else {
         bail!("source300 artwork token has nontext storage");
@@ -2032,7 +2034,7 @@ fn cache_id(row: &Row<'_>, empty_music_library: bool) -> Result<(u32, bool)> {
         .context("source300 artwork token exceeds u32")?;
     let canonical = id >= 100 && id.to_string() == token;
     ensure!(
-        canonical || empty_music_library,
+        canonical || token == "0" || empty_music_library,
         "source300 artwork token {token:?} is reserved or noncanonical"
     );
     Ok((id, canonical))
@@ -2086,10 +2088,12 @@ fn parse_artwork(
         }
         let (id, canonical) = cache_id(row, tracks.is_empty())?;
         if !canonical {
-            // A stale post-clear object is not eligible as a cover or for
-            // reuse. Its normalized ID still reserves the numeric namespace.
+            // A stale/placeholder object is not a usable cached cover. Hold
+            // its normalized ID only if our artwork allocator could use it.
             inventory.source300_rows.cached_rows += 1;
-            inventory.occupied_cache_ids.insert(id);
+            if id >= 100 {
+                inventory.occupied_cache_ids.insert(id);
+            }
             continue;
         }
         let variant = integer(row, "artwork_variant_type")?;
@@ -2139,6 +2143,27 @@ fn parse_artwork(
         seen += 1;
         ensure!(seen <= MAX_ROWS, "artwork relation row bound exceeded");
         let source = integer(row, "artwork_source_type")?;
+        let canonical_id = if source == 300 {
+            let (id, canonical) = cache_id(row, tracks.is_empty())?;
+            inventory.source300_rows.registration_rows += 1;
+            if id >= 100 {
+                inventory.occupied_cache_ids.insert(id);
+            }
+            if !canonical {
+                // In particular, "0" may belong to a live track after sync.
+                // It is a placeholder, not proof of an artwork registration.
+                inventory.unmapped_source300_token_rows += 1;
+                continue;
+            }
+            Some(id)
+        } else {
+            inventory
+                .other_source_rows
+                .entry(source)
+                .or_default()
+                .registration_rows += 1;
+            None
+        };
         if row.get_ref("entity_type")? == ValueRef::Integer(0) {
             let entity = integer(row, "entity_pid")?;
             if !unsynced_items.contains(&entity) && !tracks.is_empty() {
@@ -2148,21 +2173,9 @@ fn parse_artwork(
                 inventory.tracks_with_artwork_registration.insert(sync_id);
             }
         }
-        if source != 300 {
-            inventory
-                .other_source_rows
-                .entry(source)
-                .or_default()
-                .registration_rows += 1;
+        let Some(id) = canonical_id else {
             continue;
-        }
-        let (id, canonical) = cache_id(row, tracks.is_empty())?;
-        inventory.source300_rows.registration_rows += 1;
-        inventory.occupied_cache_ids.insert(id);
-        if !canonical {
-            inventory.unmapped_source300_token_rows += 1;
-            continue;
-        }
+        };
         let shape = (
             integer(row, "entity_type")?,
             integer(row, "artwork_type")?,
