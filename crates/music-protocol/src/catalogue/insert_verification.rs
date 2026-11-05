@@ -2215,6 +2215,42 @@ Line two' WHERE item_pid=2;
     }
 
     #[test]
+    fn zero_artwork_placeholders_do_not_block_verifying_uncovered_batch() {
+        // The phone's Music library can insert a source300 "0" registration
+        // when an MP3 has no embedded art. It is a placeholder, not a cover.
+        // Verifying the already-started batch must not mistake it for an
+        // unplanned artwork allocation or for an actual track registration.
+        let before = compilation_state(0, "");
+        let after = compilation_state_at(
+            2,
+            13,
+            "INSERT INTO artwork VALUES('0',300,6,0,NULL);
+             INSERT INTO artwork_token VALUES(2,'0',300,1,0,0);
+             INSERT INTO artwork_token VALUES(3,'0',300,1,0,0);
+             INSERT INTO artwork_token VALUES(131,'0',300,6,4,0);",
+        );
+        let a = compilation_source("A", true);
+        let b = compilation_source("B", false);
+        let expected = [
+            compilation_expected(&a, true),
+            compilation_expected(&b, false),
+        ];
+        let checked = verify_insert_batch(&before, &after, &expected).unwrap();
+        assert_eq!(checked.track_ids.len(), 2);
+        assert!(checked.covers.is_empty());
+
+        // A genuinely allocatable ID with an unplanned registration is
+        // still rejected even when the zero placeholder also appears.
+        let bad = compilation_state_at(
+            2,
+            13,
+            "INSERT INTO artwork_token VALUES(2,'0',300,1,0,0);
+             INSERT INTO artwork_token VALUES(3,'677',300,1,0,0);",
+        );
+        assert!(verify_insert_batch(&before, &bad, &expected).is_err());
+    }
+
+    #[test]
     fn covered_members_register_their_covers_and_may_cover_their_album() {
         let a = compilation_source("A", true);
         let b = compilation_source("B", false);
