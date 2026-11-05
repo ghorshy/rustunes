@@ -725,10 +725,11 @@ fn analyze_copies(
             count += 1;
             total += 1;
             cells += columns.len();
-            ensure!(
-                count <= 50_000 && total <= 200_000 && cells <= 2_000_000,
-                "SQL row/cell count exceeds bound"
-            );
+            // The total-row, cell, encoded-byte, and deadline limits already
+            // bound memory and work. A 50k per-table ceiling independently
+            // rejected otherwise bounded libraries with unusually large
+            // history/metadata tables, including libraries with zero tracks.
+            ensure_row_cell_budget(name, count, total, cells)?;
             let row: Row = (0..columns.len())
                 .map(|i| {
                     check_sql_phase(policy)?;
@@ -769,6 +770,47 @@ fn analyze_copies(
     };
     Ok((snap, deadline))
 }
+/// Keep the aggregate limits rather than an arbitrary per-table cap.
+/// Name the offending table and counters so a bounded inspection failure is
+/// actionable without relaxing its row, cell, byte or time limits.
+fn ensure_row_cell_budget(
+    table: &str,
+    table_rows: usize,
+    total_rows: usize,
+    cells: usize,
+) -> Result<()> {
+    const TOTAL_ROW_CAP: usize = 200_000;
+    const TOTAL_CELL_CAP: usize = 2_000_000;
+    ensure!(
+        total_rows <= TOTAL_ROW_CAP && cells <= TOTAL_CELL_CAP,
+        "SQL row/cell count exceeds bound at table {table}: \
+         table_rows={table_rows}, total_rows={total_rows}/{TOTAL_ROW_CAP}, \
+         cells={cells}/{TOTAL_CELL_CAP}"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod row_budget_tests {
+    use super::ensure_row_cell_budget;
+
+    #[test]
+    fn large_single_table_is_legal_within_unchanged_aggregate_bounds() {
+        assert!(ensure_row_cell_budget("artwork_token", 50_001, 50_001, 400_008).is_ok());
+        assert!(ensure_row_cell_budget("artwork_token", 200_000, 200_000, 2_000_000).is_ok());
+    }
+
+    #[test]
+    fn aggregate_row_and_cell_limits_still_refuse_oversized_catalogues() {
+        let rows = ensure_row_cell_budget("items", 100, 200_001, 500_000)
+            .unwrap_err().to_string();
+        assert!(rows.contains("items") && rows.contains("200001/200000"));
+        let cells = ensure_row_cell_budget("tokens", 100, 100_000, 2_000_001)
+            .unwrap_err().to_string();
+        assert!(cells.contains("tokens") && cells.contains("2000001/2000000"));
+    }
+}
+
 fn subtract(a: &Rows, b: &Rows, budget: &Budget) -> Result<Vec<Value>> {
     let mut result = Vec::new();
     for (position, (r, n)) in a.iter().enumerate() {
