@@ -28,7 +28,11 @@ const FILES: [&str; 3] = [
     "MediaLibrary.sqlitedb-wal",
     "MediaLibrary.sqlitedb-shm",
 ];
-const COPY_CAP: u64 = 32 * 1024 * 1024;
+// Keep device copy limits aligned with the SQLite reader's bounded input sizes.
+const COPY_CAPS: [u64; 2] = [
+    music_protocol::catalogue::sqlite::MAX_DATABASE_BYTES,
+    music_protocol::catalogue::sqlite::MAX_WAL_BYTES,
+];
 /// The untested user_version last warned about, so that a command capturing
 /// the catalogue several times warns once.
 static WARNED_VERSION: AtomicI64 = AtomicI64::new(0);
@@ -420,8 +424,8 @@ async fn capture_client(
 ) -> Result<Captured> {
     check_control(control)?;
     let before = attributes(&mut afc, trace, "before", deadline, control).await?;
-    let database_size = selected_size(&before[0], true)?.unwrap();
-    let wal_size = selected_size(&before[1], false)?;
+    let database_size = selected_size(&before[0], true, 0)?.unwrap();
+    let wal_size = selected_size(&before[1], false, 1)?;
     if let Some(attrs) = &before[2] {
         regular_size(attrs)?;
     }
@@ -445,7 +449,7 @@ async fn capture_client(
             &mut copied_output,
             size,
             copy::CopyLimits {
-                maximum_size: COPY_CAP,
+                maximum_size: COPY_CAPS[index],
                 maximum_reads: MAX_READS,
             },
             deadline,
@@ -529,8 +533,8 @@ fn check_capture_stability(
         "invalid catalog attribute set"
     );
     for set in [before, after] {
-        selected_size(&set[0], true)?;
-        selected_size(&set[1], false)?;
+        selected_size(&set[0], true, 0)?;
+        selected_size(&set[1], false, 1)?;
         if let Some(attrs) = &set[2] {
             regular_size(attrs)?;
         }
@@ -647,15 +651,17 @@ impl Write for HashedFile {
         self.file.flush()
     }
 }
-fn selected_size(attrs: &Option<Attributes>, required: bool) -> Result<Option<u64>> {
+fn selected_size(attrs: &Option<Attributes>, required: bool, index: usize) -> Result<Option<u64>> {
+    let cap = COPY_CAPS[index];
     let Some(attrs) = attrs else {
         ensure!(!required, "device MediaLibrary database is absent");
         return Ok(None);
     };
     let size = regular_size(attrs)?;
     ensure!(
-        size <= COPY_CAP && (!required || size > 0),
-        "catalog database/WAL size unsupported (32 MiB cap per file)"
+        size <= cap && (!required || size > 0),
+        "{} size {size} bytes unsupported (maximum {cap} bytes)",
+        FILES[index],
     );
     Ok(Some(size))
 }
@@ -826,11 +832,14 @@ mod tests {
 
     #[test]
     fn sizes_and_cross_file_identity_are_guarded_but_access_time_may_change() {
-        assert!(selected_size(&None, true).is_err());
-        assert_eq!(selected_size(&None, false).unwrap(), None);
-        assert_eq!(selected_size(&Some(attrs(0)), false).unwrap(), Some(0));
-        assert!(selected_size(&Some(attrs(0)), true).is_err());
-        assert!(selected_size(&Some(attrs(COPY_CAP + 1)), false).is_err());
+        assert!(selected_size(&None, true, 0).is_err());
+        assert_eq!(selected_size(&None, false, 1).unwrap(), None);
+        assert_eq!(selected_size(&Some(attrs(0)), false, 1).unwrap(), Some(0));
+        assert!(selected_size(&Some(attrs(0)), true, 0).is_err());
+        assert!(selected_size(&Some(attrs(COPY_CAPS[0])), true, 0).is_ok());
+        assert!(selected_size(&Some(attrs(COPY_CAPS[0] + 1)), true, 0).is_err());
+        assert!(selected_size(&Some(attrs(COPY_CAPS[1])), false, 1).is_ok());
+        assert!(selected_size(&Some(attrs(COPY_CAPS[1] + 1)), false, 1).is_err());
         let before = attrs(5);
         let mut after = before.clone();
         after.insert("st_atime".into(), "456".into());
@@ -876,7 +885,7 @@ mod tests {
             );
         }
         let mut oversized = after.clone();
-        oversized[1] = Some(attrs(COPY_CAP + 1));
+        oversized[1] = Some(attrs(COPY_CAPS[1] + 1));
         assert!(
             check_capture_stability(&before, &oversized)
                 .unwrap_err()
