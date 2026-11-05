@@ -1234,6 +1234,56 @@ fn source300_tokens_must_be_bounded_canonical_decimal_u32_text() {
     }
 }
 
+#[test]
+fn emptied_music_library_preserves_stale_source300_ids_without_treating_them_as_covers() {
+    let fixture = Fixture::new(false);
+    fixture
+        .connection
+        .execute_batch(
+            "DELETE FROM item_stats;
+             DELETE FROM item_state;
+             DELETE FROM item_store;
+             DELETE FROM item_extra;
+             DELETE FROM item;
+             INSERT INTO artwork_token VALUES(1,'0',300,1,0,0);
+             INSERT INTO artwork_token VALUES(1,'0007',300,1,0,0);
+             INSERT INTO artwork_token VALUES(1,'677',300,1,0,0);
+             INSERT INTO artwork VALUES('099',300,6,0,NULL);
+             INSERT INTO artwork VALUES('678',300,6,0,'aa/00000000000000000000000000000000000000');"
+        )
+        .unwrap();
+    let catalog = fixture.read(false).unwrap();
+    assert!(catalog.tracks().is_empty());
+    let art = catalog.artwork();
+    assert_eq!(
+        art.occupied_cache_ids(),
+        &BTreeSet::from([0, 7, 99, 677, 678])
+    );
+    assert_eq!(art.cached_ids(), &BTreeSet::from([678]));
+    assert!(art.track_cache_ids().is_empty());
+    assert!(art.tracks_with_artwork_registration().is_empty());
+    assert_eq!(art.unmapped_source300_token_rows(), 3);
+    assert_eq!(art.source300_rows().cached_rows, 2);
+    assert_eq!(art.source300_rows().registration_rows, 3);
+}
+
+#[test]
+fn empty_music_library_still_refuses_nonnumeric_source300_artwork_tokens() {
+    let fixture = Fixture::new(false);
+    fixture
+        .connection
+        .execute_batch(
+            "DELETE FROM item_stats;
+             DELETE FROM item_state;
+             DELETE FROM item_store;
+             DELETE FROM item_extra;
+             DELETE FROM item;
+             INSERT INTO artwork_token VALUES(1,'not-a-number',300,1,0,0);"
+        )
+        .unwrap();
+    assert!(fixture.read(false).is_err());
+}
+
 /// A removal session that deletes an emptied album keeps its cover token (seen
 /// in a 100-target removal): the ID stays occupied and belongs to no album.
 #[test]
