@@ -2013,10 +2013,12 @@ fn stats_fingerprints(
     Ok((result, dates))
 }
 
-// Captures from the phone pin this exact scoped decimal mapping against every
-// baseline cache field and a traced artwork update. Source500 is a different
-// namespace.
-fn cache_id(row: &Row<'_>) -> Result<u32> {
+// Only canonical source300 artwork cache IDs are usable as media artwork.
+// Apple's post-clear databases may retain reserved or noncanonical numeric
+// tokens after every music track has been removed. Keep their normalized u32
+// IDs occupied to avoid collisions, but never interpret them as live artwork.
+// If any music remains, retain the strict canonical requirement.
+fn cache_id(row: &Row<'_>, empty_music_library: bool) -> Result<(u32, bool)> {
     let ValueRef::Text(bytes) = row.get_ref("artwork_token")? else {
         bail!("source300 artwork token has nontext storage");
     };
@@ -2028,11 +2030,12 @@ fn cache_id(row: &Row<'_>) -> Result<u32> {
     let id: u32 = token
         .parse()
         .context("source300 artwork token exceeds u32")?;
+    let canonical = id >= 100 && id.to_string() == token;
     ensure!(
-        id >= 100 && id.to_string() == token,
-        "source300 artwork token is reserved or noncanonical"
+        canonical || empty_music_library,
+        "source300 artwork token {token:?} is reserved or noncanonical"
     );
-    Ok(id)
+    Ok((id, canonical))
 }
 
 /// Registrations of items and albums no sync made are counted, and their
@@ -2081,7 +2084,14 @@ fn parse_artwork(
                 .cached_rows += 1;
             continue;
         }
-        let id = cache_id(row)?;
+        let (id, canonical) = cache_id(row, tracks.is_empty())?;
+        if !canonical {
+            // A stale post-clear object is not eligible as a cover or for
+            // reuse. Its normalized ID still reserves the numeric namespace.
+            inventory.source300_rows.cached_rows += 1;
+            inventory.occupied_cache_ids.insert(id);
+            continue;
+        }
         let variant = integer(row, "artwork_variant_type")?;
         let artwork_type = integer(row, "artwork_type")?;
         let relative_path = match row.get_ref("relative_path")? {
@@ -2131,7 +2141,7 @@ fn parse_artwork(
         let source = integer(row, "artwork_source_type")?;
         if row.get_ref("entity_type")? == ValueRef::Integer(0) {
             let entity = integer(row, "entity_pid")?;
-            if !unsynced_items.contains(&entity) {
+            if !unsynced_items.contains(&entity) && !tracks.is_empty() {
                 let sync_id = *track_ids
                     .get(&entity)
                     .context("track artwork registration join absent")?;
@@ -2146,9 +2156,13 @@ fn parse_artwork(
                 .registration_rows += 1;
             continue;
         }
-        let id = cache_id(row)?;
+        let (id, canonical) = cache_id(row, tracks.is_empty())?;
         inventory.source300_rows.registration_rows += 1;
         inventory.occupied_cache_ids.insert(id);
+        if !canonical {
+            inventory.unmapped_source300_token_rows += 1;
+            continue;
+        }
         let shape = (
             integer(row, "entity_type")?,
             integer(row, "artwork_type")?,
@@ -2156,6 +2170,12 @@ fn parse_artwork(
         );
         match shape {
             (0, 1, 0) => {
+                // Finder may delete every music track while leaving behind its
+                // artwork registrations. They name no surviving music.
+                if tracks.is_empty() {
+                    inventory.unmapped_source300_token_rows += 1;
+                    continue;
+                }
                 let entity = integer(row, "entity_pid")?;
                 if unsynced_items.contains(&entity) {
                     inventory.unmapped_source300_token_rows += 1;
