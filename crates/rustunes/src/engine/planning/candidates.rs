@@ -40,10 +40,14 @@ pub fn generate(
         && journal.outstanding()?.is_none()
     {
         for source in &sources.mp3_tracks {
-            let prepared = PreparedSource::read_expected(
+            // A source this run cannot send (too large, changed, unreadable)
+            // gets no candidate; its row reports the refusal as a conflict.
+            let Ok(prepared) = PreparedSource::read_expected(
                 &sources.base_directory.join(&source.relative_path),
                 &source.source,
-            )?;
+            ) else {
+                continue;
+            };
             if prepared.ensure_batch_insertion_allowed().is_err() {
                 continue;
             }
