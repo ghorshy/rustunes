@@ -522,6 +522,22 @@ fn pull_takes_tracks_into_a_directory_and_config_sets_the_library() {
             setting: super::ConfigCommand::Library { directory: None }
         }
     ));
+    assert!(matches!(
+        Cli::try_parse_from(["tool", "config", "artist-separator", " & "])
+            .unwrap()
+            .command,
+        Command::Config {
+            setting: super::ConfigCommand::ArtistSeparator { separator: Some(s) }
+        } if s == " & "
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["tool", "config", "artist-separator"])
+            .unwrap()
+            .command,
+        Command::Config {
+            setting: super::ConfigCommand::ArtistSeparator { separator: None }
+        }
+    ));
 }
 
 #[test]

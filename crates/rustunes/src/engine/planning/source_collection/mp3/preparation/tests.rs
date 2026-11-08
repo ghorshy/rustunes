@@ -171,20 +171,23 @@ fn metadata_is_not_silently_truncated_normalized_or_relabelled() {
 }
 
 #[test]
-fn an_mp3_with_two_composers_is_refused_with_the_tag_to_edit() {
-    // Apple's readers take one composer; only a FLAC's are joined.
+fn an_mp3_with_two_composers_is_added_with_them_joined() {
     let temp = Temp::new();
     let mut values = tags();
     values.extend([("TCOM", "Artist B"), ("TCOM", "Artist C")]);
     let (path, source) = temp.source(&values, audio());
     assert_eq!(source.metadata.composer, ["Artist B", "Artist C"]);
     let p = PreparedSource::read_expected(&path, &source).unwrap();
-    assert!(p.assessment().metadata.is_none());
     assert_eq!(
-        p.ensure_batch_insertion_allowed().unwrap_err().to_string(),
-        "MPEG-1 Layer III source is outside the insert-batch profile: \
-         composer has 2 values in the file's tag; edit the tag to keep one"
+        p.assessment()
+            .metadata
+            .as_ref()
+            .unwrap()
+            .composer
+            .as_deref(),
+        Some("Artist B; Artist C")
     );
+    p.ensure_batch_insertion_allowed().unwrap();
 }
 
 #[test]

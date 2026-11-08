@@ -429,10 +429,7 @@ mod tests {
     fn existing_groups_reuse_role_ids_and_only_track_is_new() {
         let mut p = planner();
         let mut s = source();
-        s.artist = vec![
-            "FIRST ARTIST".into(),
-            "Additional scalar value ignored".into(),
-        ];
+        s.artist = vec!["FIRST ARTIST".into()];
         let plan = p.plan(&s, candidates(u64::MAX)).unwrap();
         assert_eq!(
             (plan.track_pid(), plan.artist_pid(), plan.album_pid()),

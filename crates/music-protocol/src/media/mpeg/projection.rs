@@ -16,7 +16,7 @@ use super::{
 use crate::media::{
     audio_source::Stream,
     format::Format,
-    metadata::{ScalarMetadata, distinct_tag_values},
+    metadata::{ScalarMetadata, artist_separator, check_text, distinct_tag_values, joined_names},
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -228,33 +228,8 @@ fn text(values: &[String], field: &str, required: bool) -> Result<Option<String>
         ensure!(!required, "missing {field}");
         return Ok(None);
     };
-    valid(value, field)?;
+    check_text(value, field)?;
     Ok(Some((*value).to_owned()))
-}
-
-/// A value that says something, held to the catalogue's text rules.
-fn valid(value: &str, field: &str) -> Result<()> {
-    ensure!(
-        value.len() <= 4096 && !value.chars().any(char::is_control),
-        "invalid {field} text"
-    );
-    Ok(())
-}
-
-/// A FLAC's Vorbis comments name one artist per `ARTIST` entry and one
-/// composer per `COMPOSER` entry. Apple's sync reads no FLAC, so this is the
-/// host's rule: the distinct entries, each valid on its own, joined in file
-/// order with ", " into the one value the field holds. A single entry stays as
-/// it is, and an empty entry is no entry.
-fn joined(values: &[String], field: &str) -> Result<Vec<String>> {
-    let distinct = distinct_tag_values(values);
-    if distinct.len() > 1 {
-        for value in &distinct {
-            valid(value, field)?;
-        }
-        return Ok(vec![distinct.join(", ")]);
-    }
-    Ok(distinct.into_iter().map(str::to_owned).collect())
 }
 
 /// The one year a tag's release dates give. Every date (`DATE`, `YEAR`,
@@ -265,7 +240,7 @@ fn joined(values: &[String], field: &str) -> Result<Vec<String>> {
 fn release_year(values: &[String]) -> Result<Option<u32>> {
     let mut years: Vec<u32> = Vec::new();
     for value in distinct_tag_values(values) {
-        valid(value, "release date")?;
+        check_text(value, "release date")?;
         ensure!(
             value.len() >= 4
                 && value.as_bytes()[..4].iter().all(u8::is_ascii_digit)
@@ -306,15 +281,15 @@ fn numbering(number: Option<u32>, total: Option<u32>, field: &str) -> Result<()>
     Ok(())
 }
 
-/// The catalogue fields `source`'s tags give. A FLAC's repeated artists,
-/// composers and their sort names are joined (see `joined`); every other
-/// repeated field, and every repeated field of another format, is refused.
-/// An empty value is no value.
+/// The catalogue fields `source`'s tags give. Several artists, composers
+/// and their sort names are joined with this process's
+/// [`artist_separator`] (see `metadata::joined_names`); every other repeated
+/// field is refused. An empty value is no value.
 pub fn project(source: &Source) -> Result<Metadata> {
-    project_tags(&source.metadata, source.format() == Format::Flac)
+    project_tags(&source.metadata, &artist_separator())
 }
 
-fn project_tags(tags: &Tags, flac: bool) -> Result<Metadata> {
+fn project_tags(tags: &Tags, separator: &str) -> Result<Metadata> {
     numbering(tags.track, tags.track_total, "track")?;
     numbering(tags.disc, tags.disc_total, "disc")?;
     let year = release_year(&tags.release_date)?;
@@ -325,35 +300,20 @@ fn project_tags(tags: &Tags, flac: bool) -> Result<Metadata> {
             "numeric ID3 genres require an explicit label mapping"
         );
     }
-    let (artist, sort_artist, composer, sort_composer) = if flac {
-        (
-            joined(&tags.artist, "artist")?,
-            joined(&tags.sort_artist, "sort artist")?,
-            joined(&tags.composer, "composer")?,
-            joined(&tags.sort_composer, "sort composer")?,
-        )
-    } else {
-        (
-            tags.artist.clone(),
-            tags.sort_artist.clone(),
-            tags.composer.clone(),
-            tags.sort_composer.clone(),
-        )
-    };
     Ok(Metadata {
         comment: crate::media::metadata::comment_text(&tags.catalogue_comments())?
             .map(str::to_owned),
         sort_title: text(&tags.sort_title, "sort title", false)?,
-        sort_artist: text(&sort_artist, "sort artist", false)?,
+        sort_artist: joined_names(&tags.sort_artist, "sort artist", separator)?,
         sort_album: text(&tags.sort_album, "sort album", false)?,
         sort_album_artist: text(&tags.sort_album_artist, "sort album artist", false)?,
-        sort_composer: text(&sort_composer, "sort composer", false)?,
+        sort_composer: joined_names(&tags.sort_composer, "sort composer", separator)?,
         title: text(&tags.title, "title", true)?.context("missing title")?,
-        artist: text(&artist, "artist", true)?.context("missing artist")?,
+        artist: joined_names(&tags.artist, "artist", separator)?.context("missing artist")?,
         album: text(&tags.album, "album", true)?.context("missing album")?,
         album_artist: text(&tags.album_artist, "album artist", false)?,
         genre,
-        composer: text(&composer, "composer", false)?,
+        composer: joined_names(&tags.composer, "composer", separator)?,
         copyright: text(&tags.copyright, "copyright", false)?,
         year,
         track: tags.track,
@@ -522,28 +482,25 @@ mod tests {
         }
     }
 
-    /// The composer and sort composer `composer` and `sort` project to.
-    fn composers(
-        composer: &[&str],
-        sort: &[&str],
-        flac: bool,
-    ) -> Result<(Option<String>, Option<String>)> {
-        let m = project_tags(&tags(composer, sort), flac)?;
+    /// The composer and sort composer `composer` and `sort` project to,
+    /// joined with `"; "`.
+    fn composers(composer: &[&str], sort: &[&str]) -> Result<(Option<String>, Option<String>)> {
+        let m = project_tags(&tags(composer, sort), "; ")?;
         Ok((m.composer, m.sort_composer))
     }
 
     #[test]
-    fn a_flac_joins_its_distinct_composers_in_file_order() {
-        let joined = |c: &[&str], s: &[&str]| composers(c, s, true).unwrap();
+    fn distinct_composers_join_in_file_order_with_the_separator() {
+        let joined = |c: &[&str], s: &[&str]| composers(c, s).unwrap();
         assert_eq!(
             joined(&["Artist B", "Artist C"], &[]),
-            (Some("Artist B, Artist C".into()), None)
+            (Some("Artist B; Artist C".into()), None)
         );
         assert_eq!(
             joined(&["Artist C", "Artist B", "Artist C"], &[])
                 .0
                 .as_deref(),
-            Some("Artist C, Artist B")
+            Some("Artist C; Artist B")
         );
         assert_eq!(
             joined(&["Artist B", "Artist B"], &[]).0.as_deref(),
@@ -559,8 +516,8 @@ mod tests {
         assert_eq!(
             joined(&["Artist B", "Artist C"], &["B, Artist", "C, Artist"]),
             (
-                Some("Artist B, Artist C".into()),
-                Some("B, Artist, C, Artist".into())
+                Some("Artist B; Artist C".into()),
+                Some("B, Artist; C, Artist".into())
             )
         );
         assert_eq!(joined(&["Artist B"], &["", ""]).1, None);
@@ -568,50 +525,52 @@ mod tests {
     }
 
     #[test]
+    fn the_configured_separator_joins_artists_and_composers() {
+        let mut t = artists(&["Bakey", "Capo Lee"], &["Bakey", "Lee, Capo"]);
+        t.composer = vec!["Writer A".into(), "Writer B".into()];
+        let m = project_tags(&t, " & ").unwrap();
+        assert_eq!(
+            (
+                m.artist.as_str(),
+                m.sort_artist.as_deref(),
+                m.composer.as_deref()
+            ),
+            (
+                "Bakey & Capo Lee",
+                Some("Bakey & Lee, Capo"),
+                Some("Writer A & Writer B")
+            )
+        );
+        assert_eq!(project_tags(&t, ", ").unwrap().artist, "Bakey, Capo Lee");
+    }
+
+    #[test]
     fn each_joined_entry_and_the_join_are_checked_as_one_value_is() {
-        let refused = |c: &[&str]| composers(c, &[], true).unwrap_err().to_string();
+        let refused = |c: &[&str]| composers(c, &[]).unwrap_err().to_string();
         assert_eq!(refused(&["Artist B", "Artist\nC"]), "invalid composer text");
         // The join's length is held to a single value's.
-        let (a, b) = ("a".repeat(2047), "b".repeat(2047));
-        let fits = composers(&[&a, &b], &[], true).unwrap().0.unwrap();
+        let (a, b) = ("a".repeat(2046), "b".repeat(2048));
+        let fits = composers(&[&a, &b], &[]).unwrap().0.unwrap();
         assert_eq!(fits.len(), 4096);
         assert_eq!(refused(&[&a, &format!("{b}b")]), "invalid composer text");
         assert_eq!(refused(&[&"a".repeat(4097)]), "invalid composer text");
-        let sort = composers(&["Artist B"], &["B", "C\t"], true).unwrap_err();
+        let sort = composers(&["Artist B"], &["B", "C\t"]).unwrap_err();
         assert_eq!(sort.to_string(), "invalid sort composer text");
     }
 
     #[test]
     fn an_empty_value_is_no_value() {
-        let composer = |c: &[&str], flac: bool| composers(c, &[], flac).unwrap().0;
-        // An empty entry drops out of a FLAC's join, and a lone one leaves the field absent.
-        assert_eq!(
-            composer(&["Artist B", ""], true).as_deref(),
-            Some("Artist B")
-        );
-        assert_eq!(
-            composer(&["", "Artist B", ""], true).as_deref(),
-            Some("Artist B")
-        );
-        assert_eq!(composer(&[""], true), None);
-        assert_eq!(composer(&["", ""], true), None);
-        // The same in a format that keeps one value per field.
-        assert_eq!(composer(&[""], false), None);
-        assert_eq!(
-            composer(&["Artist B", ""], false).as_deref(),
-            Some("Artist B")
-        );
-        // Two values that say something are still two.
-        let two = composers(&["Artist B", "", "Artist C"], &[], false).unwrap_err();
-        assert_eq!(
-            two.to_string(),
-            "composer has 2 values in the file's tag; edit the tag to keep one"
-        );
+        let composer = |c: &[&str]| composers(c, &[]).unwrap().0;
+        // An empty entry drops out of a join, and a lone one leaves the field absent.
+        assert_eq!(composer(&["Artist B", ""]).as_deref(), Some("Artist B"));
+        assert_eq!(composer(&["", "Artist B", ""]).as_deref(), Some("Artist B"));
+        assert_eq!(composer(&[""]), None);
+        assert_eq!(composer(&["", ""]), None);
         // A required field left with no value is missing, and an empty sort
         // name says nothing.
         let mut empty = artists(&[""], &[""]);
         assert_eq!(
-            project_tags(&empty, true).unwrap_err().to_string(),
+            project_tags(&empty, "; ").unwrap_err().to_string(),
             "missing artist"
         );
         empty.artist = vec!["Artist A".into()];
@@ -619,7 +578,7 @@ mod tests {
         empty.copyright = vec![String::new()];
         empty.album_artist = vec![String::new()];
         empty.release_date = vec![String::new()];
-        let m = project_tags(&empty, false).unwrap();
+        let m = project_tags(&empty, "; ").unwrap();
         assert_eq!(
             (
                 &m.genre,
@@ -631,13 +590,10 @@ mod tests {
             (&None, &None, &None, None, &None)
         );
         // An emptied tag projects as a removed one.
+        assert_eq!(m, project_tags(&artists(&["Artist A"], &[]), "; ").unwrap());
         assert_eq!(
-            m,
-            project_tags(&artists(&["Artist A"], &[]), false).unwrap()
-        );
-        assert_eq!(
-            project_tags(&artists(&["Artist A"], &[]), true).unwrap(),
-            project_tags(&artists(&["Artist A"], &[""]), true).unwrap()
+            project_tags(&artists(&["Artist A"], &[]), "; ").unwrap(),
+            project_tags(&artists(&["Artist A"], &[""]), "; ").unwrap()
         );
     }
 
@@ -651,14 +607,14 @@ mod tests {
     }
 
     #[test]
-    fn a_flac_joins_its_distinct_artists_as_its_composers() {
+    fn distinct_artists_join_as_composers_do() {
         let joined = |a: &[&str], s: &[&str]| {
-            let m = project_tags(&artists(a, s), true).unwrap();
+            let m = project_tags(&artists(a, s), "; ").unwrap();
             (m.artist, m.sort_artist)
         };
         assert_eq!(
             joined(&["Artist A", "Artist B", "Artist C"], &[]),
-            ("Artist A, Artist B, Artist C".into(), None)
+            ("Artist A; Artist B; Artist C".into(), None)
         );
         assert_eq!(
             joined(
@@ -666,14 +622,14 @@ mod tests {
                 &["A, Artist", "B, Artist"]
             ),
             (
-                "Artist A, Artist B".into(),
-                Some("A, Artist, B, Artist".into())
+                "Artist A; Artist B".into(),
+                Some("A, Artist; B, Artist".into())
             )
         );
         assert_eq!(joined(&["Artist A;Artist B"], &[]).0, "Artist A;Artist B");
         assert_eq!(joined(&["Artist A", "Artist B"], &["", ""]).1, None);
         let refused =
-            |a: &[&str], s: &[&str]| project_tags(&artists(a, s), true).unwrap_err().to_string();
+            |a: &[&str], s: &[&str]| project_tags(&artists(a, s), "; ").unwrap_err().to_string();
         assert_eq!(
             joined(&["Artist A", ""], &[]).0,
             "Artist A",
@@ -687,40 +643,19 @@ mod tests {
     }
 
     #[test]
-    fn other_formats_and_other_fields_keep_one_value() {
-        let refused = |c: &[&str], s: &[&str]| composers(c, s, false).unwrap_err().to_string();
+    fn other_fields_keep_one_value() {
+        let mut repeated = tags(&["Artist B", "Artist C"], &[]);
+        repeated.title.push("Other Title".into());
         assert_eq!(
-            refused(&["Artist B", "Artist C"], &[]),
-            "composer has 2 values in the file's tag; edit the tag to keep one"
+            project_tags(&repeated, "; ").unwrap_err().to_string(),
+            "title has 2 values in the file's tag; edit the tag to keep one"
         );
+        let mut repeated = tags(&[], &[]);
+        repeated.album_artist = vec!["Artist A".into(), "Artist B".into()];
         assert_eq!(
-            refused(&["Artist B"], &["B", "C", "D"]),
-            "sort composer has 3 values in the file's tag; edit the tag to keep one"
+            project_tags(&repeated, "; ").unwrap_err().to_string(),
+            "album artist has 2 values in the file's tag; edit the tag to keep one"
         );
-        let refused =
-            |a: &[&str], s: &[&str]| project_tags(&artists(a, s), false).unwrap_err().to_string();
-        assert_eq!(
-            refused(&["Artist A", "Artist B"], &[]),
-            "artist has 2 values in the file's tag; edit the tag to keep one"
-        );
-        assert_eq!(
-            refused(&["Artist A"], &["A", "B"]),
-            "sort artist has 2 values in the file's tag; edit the tag to keep one"
-        );
-        for flac in [true, false] {
-            let mut repeated = tags(&["Artist B", "Artist C"], &[]);
-            repeated.title.push("Other Title".into());
-            assert_eq!(
-                project_tags(&repeated, flac).unwrap_err().to_string(),
-                "title has 2 values in the file's tag; edit the tag to keep one"
-            );
-            let mut repeated = tags(&[], &[]);
-            repeated.album_artist = vec!["Artist A".into(), "Artist B".into()];
-            assert_eq!(
-                project_tags(&repeated, flac).unwrap_err().to_string(),
-                "album artist has 2 values in the file's tag; edit the tag to keep one"
-            );
-        }
     }
 
     /// A FLAC whose Vorbis comment holds `entries`, read as any source is.
@@ -885,20 +820,46 @@ mod tests {
     }
 
     #[test]
-    fn a_flac_source_is_projected_by_its_format() {
+    fn repeated_m4a_artist_and_composer_atoms_are_joined() {
+        use lofty::mp4::{Atom, AtomData, AtomIdent};
+        let source = aac(|tag| {
+            for (atom, first, second) in [
+                (*b"\xa9ART", "Bakey", "Capo Lee"),
+                (*b"\xa9wrt", "Writer A", "Writer B"),
+            ] {
+                tag.replace_atom(Atom::new(
+                    AtomIdent::Fourcc(atom),
+                    AtomData::UTF8(first.into()),
+                ));
+                tag.insert(Atom::new(
+                    AtomIdent::Fourcc(atom),
+                    AtomData::UTF8(second.into()),
+                ));
+            }
+        });
+        assert_eq!(source.metadata.artist, ["Bakey", "Capo Lee"]);
+        let m = project(&source).unwrap();
+        assert_eq!(
+            (m.artist.as_str(), m.composer.as_deref()),
+            ("Bakey; Capo Lee", Some("Writer A; Writer B"))
+        );
+    }
+
+    #[test]
+    fn a_flac_reader_keeps_every_entry_and_the_projection_joins_them() {
         let names = ["TITLE=Title", "ARTIST=Artist A", "ALBUM=Album"];
         let source = flac(&[&names[..], &["COMPOSER=Artist B", "composer=Artist C"]].concat());
         // The reader keeps every entry; the projection joins them.
         assert_eq!(source.metadata.composer, ["Artist B", "Artist C"]);
         assert_eq!(
             project(&source).unwrap().composer.as_deref(),
-            Some("Artist B, Artist C")
+            Some("Artist B; Artist C")
         );
         let source = flac(&[&names[..], &["artist=Artist B", "ARTIST=Artist C"]].concat());
         assert_eq!(source.metadata.artist, ["Artist A", "Artist B", "Artist C"]);
         assert_eq!(
             project(&source).unwrap().artist,
-            "Artist A, Artist B, Artist C"
+            "Artist A; Artist B; Artist C"
         );
         let source = flac(&[&names[..], &["TITLE=Other Title"]].concat());
         assert_eq!(

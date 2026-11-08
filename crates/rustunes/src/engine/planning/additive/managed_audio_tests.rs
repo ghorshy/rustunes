@@ -309,7 +309,9 @@ fn replacement_plan(f: &Fixture, add_only: bool) -> Plan {
     plan_for(f, &sources, add_only)
 }
 fn plan_for(f: &Fixture, sources: &SourceCollection, add_only: bool) -> Plan {
-    let catalog = f.catalog("Standard title");
+    plan_against(f, sources, add_only, f.catalog("Standard title"))
+}
+fn plan_against(f: &Fixture, sources: &SourceCollection, add_only: bool, catalog: Catalog) -> Plan {
     let index = index(f, &catalog);
     let mut candidates = BTreeMap::new();
     candidates.insert(
@@ -568,6 +570,62 @@ fn managed_audio_same_encoded_retag_is_a_metadata_update() {
     );
     let plan = plan_for(&f, &sources, true);
     assert!(matches!(row(&plan).decision, Decision::Keep));
+}
+/// `bytes` with its `©ART` atom holding `artists` as repeated outer atoms.
+fn with_artists(bytes: &[u8], artists: &[&str]) -> Vec<u8> {
+    use lofty::{
+        config::{ParseOptions, WriteOptions},
+        file::AudioFile,
+        mp4::{Atom, AtomData, AtomIdent, Mp4File},
+    };
+    let mut data = std::io::Cursor::new(bytes.to_vec());
+    let mut file = Mp4File::read_from(&mut data, ParseOptions::default()).unwrap();
+    let tag = file.ilst_mut().unwrap();
+    let _ = tag.remove(&AtomIdent::Fourcc(*b"\xa9ART"));
+    for artist in artists {
+        tag.insert(Atom::new(
+            AtomIdent::Fourcc(*b"\xa9ART"),
+            AtomData::UTF8((*artist).into()),
+        ));
+    }
+    file.save_to(&mut data, WriteOptions::default()).unwrap();
+    data.into_inner()
+}
+#[test]
+fn a_track_sent_with_another_artist_separator_is_a_metadata_update() {
+    let bytes = with_artists(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/silence-alac.m4a"
+        )),
+        &["Artist A", "Artist B"],
+    );
+    let f = Fixture::made_with_source(|_| {}, [1; 32], &bytes, |_| {});
+    let sources = crate::engine::planning::source_collection::inspect(
+        &crate::engine::planning::source_collection::select(&f.root, &Default::default()).unwrap(),
+    )
+    .unwrap();
+    // Sent with this process's separator, the default: nothing to change.
+    assert!(matches!(
+        row(&plan_for(&f, &sources, false)).decision,
+        Decision::Keep
+    ));
+    // Sent while the separator was " & ": the artist names are updated.
+    let earlier = format!(
+        "{} UPDATE item_artist SET item_artist='Artist A & Artist B';",
+        f.catalog_sql("Standard title")
+    );
+    let catalog =
+        music_protocol::test_support::catalogue::modified_collection_catalog(14, &earlier);
+    let plan = plan_against(&f, &sources, false, catalog);
+    let Decision::Update { changes, .. } = &row(&plan).decision else {
+        panic!("{}", serde_json::to_value(row(&plan)).unwrap());
+    };
+    let artist = changes.iter().find(|c| c.field == "artist").unwrap();
+    assert_eq!(
+        (&artist.current, &artist.desired),
+        (&json!("Artist A & Artist B"), &json!("Artist A; Artist B"))
+    );
 }
 #[test]
 fn managed_audio_original_availability_is_exact_and_not_execution_authority() {

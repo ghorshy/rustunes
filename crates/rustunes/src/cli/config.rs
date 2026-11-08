@@ -1,5 +1,6 @@
 //! This host's settings: the library directory `sync` mirrors and `push` and
-//! `pull` default to. They live in `XDG_CONFIG_HOME/rustunes/config.json`
+//! `pull` default to, and the separator several artists are joined with.
+//! They live in `XDG_CONFIG_HOME/rustunes/config.json`
 //! (`~/.config/rustunes/config.json`). Unknown keys are ignored, so a file
 //! written by another version still reads.
 use std::{
@@ -10,12 +11,25 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use music_protocol::media::metadata;
 use serde::{Deserialize, Serialize};
 
 #[derive(Default, Deserialize, Serialize)]
 pub(super) struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) library: Option<PathBuf>,
+    /// What joins several artists, composers and their sort names into the
+    /// one value the phone keeps (`"; "` when unset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) artist_separator: Option<String>,
+}
+
+impl Settings {
+    pub(super) fn artist_separator(&self) -> &str {
+        self.artist_separator
+            .as_deref()
+            .unwrap_or(metadata::DEFAULT_ARTIST_SEPARATOR)
+    }
 }
 
 /// The settings file.
@@ -35,12 +49,23 @@ pub(super) fn load() -> Result<Settings> {
 }
 
 fn read(path: &Path) -> Result<Settings> {
-    match fs::read(path) {
+    let settings: Settings = match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("reading the settings in {}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
-        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+            .with_context(|| format!("reading the settings in {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    if let Some(separator) = &settings.artist_separator {
+        metadata::check_artist_separator(separator)
+            .with_context(|| format!("reading the artist separator in {}", path.display()))?;
     }
+    Ok(settings)
+}
+
+/// Make the separator in the settings the one this process joins artists
+/// with. A command that reads a source runs this first.
+pub(super) fn apply() -> Result<()> {
+    metadata::set_artist_separator(load()?.artist_separator())
 }
 
 /// Replace the settings file whole: a reader sees the old file or the new.
@@ -112,6 +137,41 @@ pub(super) fn set_library(directory: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// `config artist-separator [SEP]`: set what joins several artists, or
+/// print it. A changed separator changes the artist of every track naming
+/// several, so the next `sync` proposes updating those already on the phone.
+pub(super) fn set_artist_separator(separator: Option<&str>) -> Result<()> {
+    let file = path()?;
+    let mut settings = read(&file)?;
+    let Some(separator) = separator else {
+        if super::machine::enabled() {
+            return super::machine::report(
+                "config",
+                &serde_json::json!({"file": file, "artist_separator": settings.artist_separator(), "changed": false}),
+            );
+        }
+        println!("{:?}", settings.artist_separator());
+        return Ok(());
+    };
+    metadata::check_artist_separator(separator)?;
+    let changed = settings.artist_separator() != separator;
+    settings.artist_separator = Some(separator.to_owned());
+    write(&file, &settings)?;
+    if super::machine::enabled() {
+        return super::machine::report(
+            "config",
+            &serde_json::json!({"file": file, "artist_separator": separator, "changed": changed}),
+        );
+    }
+    println!("Artist separator: {separator:?}");
+    if changed {
+        println!(
+            "Tracks naming several artists or composers now join them with it; the next `rustunes sync` proposes updating those already on the phone."
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +186,7 @@ mod tests {
             &file,
             &Settings {
                 library: Some("/music".into()),
+                ..Settings::default()
             },
         )
         .unwrap();
@@ -138,6 +199,39 @@ mod tests {
             read(&file).unwrap().library.as_deref(),
             Some(Path::new("/other"))
         );
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn the_artist_separator_round_trips_and_defaults_to_a_semicolon() {
+        let directory =
+            std::env::temp_dir().join(format!("rustunes-separator-{}", std::process::id()));
+        let file = directory.join("rustunes/config.json");
+        assert_eq!(read(&file).unwrap().artist_separator(), "; ");
+        write(
+            &file,
+            &Settings {
+                artist_separator: Some(" & ".into()),
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(read(&file).unwrap().artist_separator(), " & ");
+        assert!(
+            fs::read_to_string(&file)
+                .unwrap()
+                .contains(r#""artist_separator": " & ""#)
+        );
+        // A separator the file holds is checked as one set by the command.
+        fs::write(&file, br#"{"artist_separator":""}"#).unwrap();
+        assert!(read(&file).is_err());
+        fs::write(
+            &file,
+            br#"{"artist_separator":"
+"}"#,
+        )
+        .unwrap();
+        assert!(read(&file).is_err());
         fs::remove_dir_all(&directory).unwrap();
     }
 }
