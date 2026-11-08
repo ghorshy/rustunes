@@ -2958,3 +2958,198 @@ fn a_managed_match_without_a_proven_cover_has_its_cover_sent_again() {
         None
     );
 }
+
+/// `silence-alac.m4a` padded past one native audio transfer with a trailing
+/// top-level `free` box, written sparse so the test does not write 64 MiB.
+fn oversize_alac(temp: &Temp) -> PathBuf {
+    use std::io::Write;
+    let path = temp.0.join("big.m4a");
+    let bytes = fs::read(fixture()).unwrap();
+    let mut file = fs::File::create(&path).unwrap();
+    file.write_all(&bytes).unwrap();
+    let free = music_protocol::protocol::transfer::MAX_AUDIO + 1 - bytes.len() as u64;
+    file.write_all(&u32::try_from(free).unwrap().to_be_bytes())
+        .unwrap();
+    file.write_all(b"free").unwrap();
+    file.set_len(music_protocol::protocol::transfer::MAX_AUDIO + 1)
+        .unwrap();
+    path
+}
+
+#[test]
+fn an_alac_too_large_to_send_is_skipped_without_holding_the_plan() {
+    assert_eq!(
+        skip::oversize_reason(),
+        "it is larger than the 64 MiB rustunes sends as one track. Encode it smaller."
+    );
+    let temp = Temp::new();
+    let path = oversize_alac(&temp);
+    let source = inspect(&select(&path, &SelectionOptions::default()).unwrap()).unwrap();
+    let catalog = music_protocol::test_support::catalogue::collection_catalog(13);
+    let other = different(fingerprint::read(&fixture()).unwrap());
+    let index = load(&catalog, &receipt(&catalog, &other, false)).unwrap();
+    let plan = build(
+        &source,
+        &catalog,
+        &index,
+        &identity(),
+        None,
+        &candidates(&source),
+    )
+    .unwrap();
+    assert!(
+        matches!(&plan.sources[0].decision, Decision::Skip { code, reason, .. }
+            if *code == skip::OVERSIZE && *reason == skip::oversize_reason()),
+        "{}",
+        serde_json::to_string(&plan.sources[0].decision).unwrap()
+    );
+    assert!(!plan.has_conflicts());
+}
+
+#[test]
+fn an_alac_too_large_to_send_that_the_phone_already_holds_is_not_refused_for_its_size() {
+    let temp = Temp::new();
+    let path = oversize_alac(&temp);
+    let source = inspect(&select(&path, &SelectionOptions::default()).unwrap()).unwrap();
+    let catalog = music_protocol::test_support::catalogue::collection_catalog(13);
+    let phone = fingerprint::read(&path).unwrap();
+    let index = load(&catalog, &receipt(&catalog, &phone, false)).unwrap();
+    let plan = build(
+        &source,
+        &catalog,
+        &index,
+        &identity(),
+        None,
+        &candidates(&source),
+    )
+    .unwrap();
+    // Nothing is sent for it, so its size is never asked: the row is decided
+    // by its match with the phone's track (here, the fixture's other tags).
+    assert_eq!(plan.sources[0].matches.len(), 1);
+    assert!(
+        !matches!(&plan.sources[0].decision,
+            Decision::Skip { code, .. } | Decision::Conflict { code, .. }
+                if *code == skip::OVERSIZE),
+        "{}",
+        serde_json::to_string(&plan.sources[0].decision).unwrap()
+    );
+}
+
+/// A 16-bit stereo 44.1 kHz WAV of silence one byte past one native audio
+/// transfer, written sparse.
+fn oversize_wav(temp: &Temp) -> PathBuf {
+    use std::io::Write;
+    let path = temp.0.join("big.wav");
+    let total = music_protocol::protocol::transfer::MAX_AUDIO + 4;
+    let data = u32::try_from(total - 44).unwrap();
+    let mut header = Vec::new();
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&(data + 36).to_le_bytes());
+    header.extend_from_slice(b"WAVEfmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&2u16.to_le_bytes());
+    header.extend_from_slice(&44_100u32.to_le_bytes());
+    header.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    header.extend_from_slice(&4u16.to_le_bytes());
+    header.extend_from_slice(&16u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data.to_le_bytes());
+    let mut file = fs::File::create(&path).unwrap();
+    file.write_all(&header).unwrap();
+    file.set_len(total).unwrap();
+    path
+}
+
+#[test]
+fn a_wav_too_large_to_send_is_skipped_for_its_size_without_holding_the_plan() {
+    let temp = Temp::new();
+    let path = oversize_wav(&temp);
+    let source = inspect(&select(&path, &SelectionOptions::default()).unwrap()).unwrap();
+    assert_eq!(source.mp3_tracks.len(), 1, "{:?}", source.failures);
+    let catalog = music_protocol::test_support::catalogue::collection_catalog(13);
+    let other = different(fingerprint::read(&fixture()).unwrap());
+    let index = load(&catalog, &receipt(&catalog, &other, false)).unwrap();
+    let plan = build(
+        &source,
+        &catalog,
+        &index,
+        &identity(),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(
+        matches!(&plan.sources[0].decision, Decision::Skip { code, reason, .. }
+            if *code == skip::OVERSIZE && *reason == skip::oversize_reason()),
+        "{}",
+        serde_json::to_string(&plan.sources[0].decision).unwrap()
+    );
+    assert!(!plan.has_conflicts());
+}
+
+#[test]
+fn sources_too_large_to_send_are_refused_for_their_size_in_every_format() {
+    let temp = Temp::new();
+    oversize_alac(&temp);
+    oversize_wav(&temp);
+    let sources = inspect(&select(&temp.0, &SelectionOptions::default()).unwrap()).unwrap();
+    let refused = uninsertable_sources(&sources);
+    assert_eq!(
+        refused,
+        [
+            ("big.m4a".to_owned(), skip::oversize_reason()),
+            ("big.wav".to_owned(), skip::oversize_reason()),
+        ],
+    );
+}
+
+/// `tone-aac.m4a` padded like `oversize_alac`.
+fn oversize_aac(temp: &Temp) -> PathBuf {
+    use std::io::Write;
+    let path = temp.0.join("big-aac.m4a");
+    let bytes =
+        fs::read(crate::test_fixtures::workspace_root().join("tests/fixtures/tone-aac.m4a"))
+            .unwrap();
+    let limit = music_protocol::protocol::transfer::MAX_AUDIO;
+    let mut file = fs::File::create(&path).unwrap();
+    file.write_all(&bytes).unwrap();
+    file.write_all(
+        &u32::try_from(limit + 1 - bytes.len() as u64)
+            .unwrap()
+            .to_be_bytes(),
+    )
+    .unwrap();
+    file.write_all(b"free").unwrap();
+    file.set_len(limit + 1).unwrap();
+    path
+}
+
+#[test]
+fn an_aac_too_large_to_send_is_skipped_for_its_size() {
+    // MP3, AAC and WAV share the MPEG path; a padded MP3 is refused earlier,
+    // at inspection, for its ID3 span.
+    let temp = Temp::new();
+    let path = oversize_aac(&temp);
+    let source = inspect(&select(&path, &SelectionOptions::default()).unwrap()).unwrap();
+    assert_eq!(source.mp3_tracks.len(), 1, "{:?}", source.failures);
+    let catalog = music_protocol::test_support::catalogue::collection_catalog(13);
+    let other = different(fingerprint::read(&fixture()).unwrap());
+    let index = load(&catalog, &receipt(&catalog, &other, false)).unwrap();
+    let plan = build(
+        &source,
+        &catalog,
+        &index,
+        &identity(),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(
+        matches!(&plan.sources[0].decision, Decision::Skip { code, reason, .. }
+            if *code == skip::OVERSIZE && *reason == skip::oversize_reason()),
+        "{}",
+        serde_json::to_string(&plan.sources[0].decision).unwrap()
+    );
+    assert!(!plan.has_conflicts());
+}

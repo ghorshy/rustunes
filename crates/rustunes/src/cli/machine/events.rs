@@ -102,7 +102,7 @@ pub(crate) fn event(event: &Event<'_>) -> Result<()> {
                 "sync_blocked",
                 Warning,
                 line()?,
-                json!({"holds": blocked.holds, "hint": blocked.hint}),
+                json!({"holds": blocked.holds, "hint": blocked.hint, "skipped": blocked.skipped}),
             )
         }
         Event::SyncFinished(result) => {

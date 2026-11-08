@@ -398,6 +398,9 @@ pub struct SyncHolds {
     /// How to send the rest without the sources that hold it, when only
     /// sources do.
     pub hint: Option<String>,
+    /// The sources the plan leaves out, which a sync without the holds
+    /// would skip.
+    pub skipped: Vec<Skipped>,
 }
 
 #[derive(serde::Serialize)]

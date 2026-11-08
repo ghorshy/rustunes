@@ -12,11 +12,23 @@
 use super::{Decision, SourceDecision};
 use crate::engine::execution::flac_to_alac;
 
+/// A source larger than one native audio transfer (`additive::oversize`).
+pub(crate) const OVERSIZE: &str = "source_exceeds_transfer_limit";
+/// What `OVERSIZE` says, in plain words.
+pub(crate) fn oversize_reason() -> String {
+    format!(
+        "it is larger than the {} MiB rustunes sends as one track. Encode it smaller.",
+        music_protocol::protocol::transfer::MAX_AUDIO / (1024 * 1024)
+    )
+}
+
 /// The refusals that leave their source out.
-const LEFT_OUT: [&str; 13] = [
+const LEFT_OUT: [&str; 14] = [
     // The file itself: unreadable, changed while it was read, outside what
-    // the phone takes, or a second copy of another file's audio.
+    // the phone takes, too large to send, or a second copy of another file's
+    // audio.
     "source_inspection_failed",
+    OVERSIZE,
     "source_changed_or_invalid",
     "unsupported_source",
     "mp3_source_profile_unsupported",
@@ -85,6 +97,7 @@ pub(crate) fn reason(
             "it changed while rustunes was reading it. Sync again once nothing is writing to it."
                 .into()
         }
+        OVERSIZE => oversize_reason(),
         "unsupported_source" => sentence(
             row.validation_issues
                 .iter()

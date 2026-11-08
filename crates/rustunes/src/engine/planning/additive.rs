@@ -534,6 +534,7 @@ fn build_inner_with_control(
         // Only a source this run could add again is a replacement.
         if !preserve_existing_tracks
             && source_supported
+            && oversize_refusal(source.fingerprint.file_bytes).is_none()
             && revalidation.is_ok()
             && source_audio[&source.fingerprint.audio.sha256] == 1
             && let Some(fields) = row.projected.as_ref()
@@ -705,7 +706,9 @@ fn build_inner_with_control(
                     ));
                 }
                 let composer = native_composer(catalog, projected.composer.as_deref());
-                if let Err(error) = &composer {
+                if let Some(refusal) = oversize_refusal(source.fingerprint.file_bytes) {
+                    row.decision = refusal;
+                } else if let Err(error) = &composer {
                     row.decision = conflict("composer_lookup_unqualified", error.to_string());
                 } else if !row.matches.is_empty() {
                     row.decision = conflict("plausible_existing_audio_requires_comparison", "Encoded mismatch is not absence: plausible metadata/duration requires optional PCM comparison or explicit review; titles establish no identity".into());
@@ -752,6 +755,9 @@ fn build_inner_with_control(
         // A source this run cannot send is left out whole, so it is never a
         // replacement either: an earlier version's track stays.
         let prepared = unmatched.then(|| {
+            if let Some(refusal) = oversize_refusal(source.source.fingerprint.file_bytes) {
+                return Err(refusal);
+            }
             if let Some(refusal) = unconvertible(sources, &source.source) {
                 return Err(conflict("flac_conversion_refused", format!("{refusal:#}")));
             }
@@ -1533,9 +1539,10 @@ fn source_row(source: &SourceTrack) -> SourceDecision {
 }
 
 /// Selected sources no plan could add, whatever the phone holds, with why:
-/// the source-side refusals of the planner above (inspection failure,
-/// revalidation, projection or profile, duplicate audio, and an MP3 outside
-/// the insert-batch profile), which an add-only plan skips. A whole-library
+/// the source-side refusals of the planner above (a file larger than one
+/// native audio transfer, inspection failure, revalidation, projection or
+/// profile, duplicate audio, and an MP3 outside the insert-batch profile),
+/// which an add-only plan skips. A whole-library
 /// replacement checks this before it removes anything.
 pub(crate) fn uninsertable_sources(sources: &SourceCollection) -> Vec<(String, String)> {
     let mut refused = Vec::new();
@@ -1546,7 +1553,9 @@ pub(crate) fn uninsertable_sources(sources: &SourceCollection) -> Vec<(String, S
     for source in &sources.tracks {
         let report =
             source_validation::inspect(&sources.base_directory.join(&source.relative_path), false);
-        let reason = if let Err(error) = check_revalidation(source, &report) {
+        let reason = if oversize_refusal(source.fingerprint.file_bytes).is_some() {
+            Some(skip::oversize_reason())
+        } else if let Err(error) = check_revalidation(source, &report) {
             Some(format!("{error:#}"))
         } else if let Err(error) = ProjectedFields::from_source(&source.metadata) {
             Some(format!("{error:#}"))
@@ -1577,6 +1586,10 @@ pub(crate) fn uninsertable_sources(sources: &SourceCollection) -> Vec<(String, S
             .filter(|t| t.source.fingerprint.audio == source.source.fingerprint.audio)
             .count()
             > 1;
+        if oversize_refusal(source.source.fingerprint.file_bytes).is_some() {
+            refused.push((source.relative_path.clone(), skip::oversize_reason()));
+            continue;
+        }
         let refusal = unconvertible(sources, &source.source)
             .or_else(|| {
                 music_protocol::media::mpeg::read(&path)
@@ -2132,6 +2145,19 @@ pub(crate) fn unconvertible(
 
 fn conflict(code: &'static str, message: String) -> Decision {
     Decision::Conflict { code, message }
+}
+
+/// The refusal for a source of `file_bytes` that this run would send but
+/// that is larger than one native audio transfer, the same for every format.
+/// A source already on the phone is never sent, so it is never asked.
+pub(crate) fn oversize_refusal(file_bytes: u64) -> Option<Decision> {
+    let limit = music_protocol::protocol::transfer::MAX_AUDIO;
+    (file_bytes > limit).then(|| {
+        conflict(
+            skip::OVERSIZE,
+            format!("Source has {file_bytes} bytes; one native audio transfer takes at most {limit} bytes"),
+        )
+    })
 }
 fn pid(value: u64) -> String {
     format!("{value:016x}")

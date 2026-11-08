@@ -275,9 +275,14 @@ pub(crate) async fn run_with(
         // The removals go even so, as they would have before the sync.
         let removed = Box::pin(remove_alone(&options, &saved, &journal, &run, engine)).await?;
         let hint = hint(&holds, &options, coordination, &engine.command_options());
-        engine.emit(Event::SyncBlocked(&SyncHolds { holds, hint }))?;
+        engine.emit(Event::SyncBlocked(&SyncHolds {
+            holds,
+            hint,
+            skipped: skipped.clone(),
+        }))?;
         let mut result = SyncResult::new(SyncOutcome::Blocked, &run, &plan, &journal, 0, 0);
         result.removed = removed;
+        result.skipped = skipped;
         return Ok(result);
     }
     if !updates.is_empty() {
@@ -300,9 +305,11 @@ pub(crate) async fn run_with(
                 engine.emit(Event::SyncBlocked(&SyncHolds {
                     holds: Vec::new(),
                     hint: None,
+                    skipped: skipped.clone(),
                 }))?;
                 let mut result = SyncResult::new(SyncOutcome::Blocked, &run, &plan, &journal, 0, 0);
                 result.removed = removed;
+                result.skipped = skipped;
                 return Ok(result);
             }
         }

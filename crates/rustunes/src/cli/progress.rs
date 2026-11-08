@@ -1,6 +1,6 @@
 //! Terminal rendering for typed engine observations.
 use crate::engine::{
-    ApplyResult, CoverResult, Event, Observation, SyncHolds, SyncOutcome, SyncResult,
+    ApplyResult, CoverResult, Event, Observation, Skipped, SyncHolds, SyncOutcome, SyncResult,
     execution::device,
 };
 use anyhow::Result;
@@ -226,7 +226,30 @@ pub(super) fn blocked(holds: &SyncHolds) -> String {
         text.push('\n');
         text.push_str(hint);
     }
+    if !holds.skipped.is_empty() {
+        for line in skipped_lines("It would also skip", &holds.skipped) {
+            text.push('\n');
+            text.push_str(&line);
+        }
+    }
     text
+}
+
+/// `verb` and how many of `skipped`, then each with why.
+fn skipped_lines(verb: &str, skipped: &[Skipped]) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{verb} {}:",
+        match skipped.len() {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        }
+    )];
+    lines.extend(
+        skipped
+            .iter()
+            .map(|skipped| format!("  {}: {}", skipped.path, skipped.reason)),
+    );
+    lines
 }
 
 /// Each source the sync left out, with why and what to do; `verb` says
@@ -235,16 +258,7 @@ fn skipped(lines: &mut Vec<String>, result: &SyncResult, verb: &str) {
     if result.skipped.is_empty() {
         return;
     }
-    lines.push(format!(
-        "{verb} {}:",
-        match result.skipped.len() {
-            1 => "1 file".to_owned(),
-            n => format!("{n} files"),
-        }
-    ));
-    for skipped in &result.skipped {
-        lines.push(format!("  {}: {}", skipped.path, skipped.reason));
-    }
+    lines.extend(skipped_lines(verb, &result.skipped));
     lines.push(format!(
         "The run directory ({}) and --message-format json have the full details.",
         result.run.display()
