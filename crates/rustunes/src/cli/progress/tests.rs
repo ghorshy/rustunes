@@ -75,6 +75,7 @@ fn a_blocked_sync_says_what_holds_it_and_how_to_send_the_rest() {
             reason: "the phone has more than one track with exactly its audio, and rustunes won't choose between them.".into(),
         }],
         hint: Some("To send the rest now without them, run `rustunes push --exclude a.m4a`: push sends new tracks only, and removes and updates nothing.".into()),
+        skipped: Vec::new(),
     };
     assert_eq!(
         blocked(&holds),
@@ -87,6 +88,7 @@ fn a_blocked_sync_says_what_holds_it_and_how_to_send_the_rest() {
             reason: "an earlier run prepared a change it never started.".into(),
         }],
         hint: None,
+        skipped: Vec::new(),
     };
     assert_eq!(
         blocked(&journal),
@@ -95,7 +97,8 @@ fn a_blocked_sync_says_what_holds_it_and_how_to_send_the_rest() {
     assert_eq!(
         blocked(&SyncHolds {
             holds: Vec::new(),
-            hint: None
+            hint: None,
+            skipped: Vec::new(),
         }),
         "Nothing was sent."
     );
@@ -169,4 +172,27 @@ fn leftover_song_files_are_said_plainly() {
         "Removed 1 leftover song file (42 MB). Left 1 file that changed since it was found."
     );
     assert!(!text(&Event::LeftoverFilesUnchecked("AFC refused")).contains("AFC"));
+}
+
+#[test]
+fn a_blocked_sync_also_names_the_files_it_would_skip() {
+    let holds = SyncHolds {
+        holds: vec![Hold {
+            path: Some("a.m4a".into()),
+            code: "multiple_existing_audio_matches".into(),
+            reason: "the phone has more than one track with exactly its audio, and rustunes won't choose between them.".into(),
+        }],
+        hint: None,
+        skipped: vec![Skipped {
+            path: "big.wav".into(),
+            code: "source_exceeds_transfer_limit",
+            reason: "it is larger than the 64 MiB rustunes sends as one track. Encode it smaller.".into(),
+            detail: "Source has 67108868 bytes; one native audio transfer takes at most 67108864 bytes".into(),
+            stage: SkipStage::Plan,
+        }],
+    };
+    assert_eq!(
+        blocked(&holds),
+        "Nothing was sent. This must be fixed first:\n  a.m4a: the phone has more than one track with exactly its audio, and rustunes won't choose between them.\nIt would also skip 1 file:\n  big.wav: it is larger than the 64 MiB rustunes sends as one track. Encode it smaller."
+    );
 }

@@ -1922,3 +1922,31 @@ fn a_flac_whose_audio_changed_since_its_conversion_is_proposed_for_replacement()
         assert_eq!(removal.tracks[0].reasons, ["source_present"]);
     }
 }
+
+#[test]
+fn a_changed_inserted_alac_too_large_to_send_is_skipped_not_proposed_as_a_replacement() {
+    use std::io::Write;
+    let f = Fixture::new();
+    changed_collection(&f);
+    let path = f.root.join("native.m4a");
+    let limit = music_protocol::protocol::transfer::MAX_AUDIO;
+    let length = fs::metadata(&path).unwrap().len();
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(&u32::try_from(limit + 1 - length).unwrap().to_be_bytes())
+        .unwrap();
+    file.write_all(b"free").unwrap();
+    file.set_len(limit + 1).unwrap();
+    let sources = crate::engine::planning::source_collection::inspect(
+        &crate::engine::planning::source_collection::select(&f.root, &Default::default()).unwrap(),
+    )
+    .unwrap();
+    let plan = plan_for(&f, &sources, false);
+    let row = row(&plan);
+    assert!(
+        matches!(row.decision, Decision::Skip { code, .. } if code == super::skip::OVERSIZE),
+        "{}",
+        serde_json::to_value(row).unwrap()
+    );
+    assert!(row.managed_audio_replacement.is_none());
+    assert!(!plan.has_conflicts());
+}
