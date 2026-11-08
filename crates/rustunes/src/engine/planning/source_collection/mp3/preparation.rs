@@ -212,10 +212,17 @@ impl PreparedSource {
     pub fn read_expected(path: &Path, expected: &Source) -> Result<Self> {
         ensure!(
             expected.fingerprint.file_bytes <= music_protocol::protocol::transfer::MAX_AUDIO,
-            "MPEG source exceeds the existing 64 MiB native audio transfer limit"
+            "MPEG source {} has {} bytes, over the existing 64 MiB native audio transfer limit",
+            path.display(),
+            expected.fingerprint.file_bytes
         );
-        let source = music_protocol::media::mpeg::read(path)?;
-        ensure!(&source == expected, "MPEG source changed after selection");
+        let source = music_protocol::media::mpeg::read(path)
+            .with_context(|| format!("reading MPEG source {}", path.display()))?;
+        ensure!(
+            &source == expected,
+            "MPEG source {} changed after selection",
+            path.display()
+        );
         let identity = source.transferred_identity()?;
         let assessment = assess(&source);
         Ok(Self {
