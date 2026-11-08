@@ -38,6 +38,10 @@ fn a_refused_tag_reads_as_what_is_wrong_and_how_to_fix_it() {
         ),
         ("zero release year", "its release year is 0. Fix the tag."),
         (
+            "release date has 2 different years in the file's tag (2010, 2012); edit the tag to keep one",
+            "its release dates name 2 different years (2010, 2012), and the phone keeps one. Edit the tag so they name the same year.",
+        ),
+        (
             "numeric ID3 genres require an explicit label mapping",
             "its genre is an ID3 genre number, not a name. Write the genre's name in the tag.",
         ),

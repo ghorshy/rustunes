@@ -328,6 +328,12 @@ fn a_flac_with_emptied_tags_converts_as_one_without_them() {
     assert_eq!(date, ["2024-05-01"]);
     // The tags written are the projection's, so the ALAC is the same file.
     assert!(alac == converted(&removed).1);
+    // Of dates naming one year, the ALAC keeps the fullest, wherever it is.
+    let year_first = write(
+        "year-first.flac",
+        &[("YEAR", "2024"), ("DATE", "2024-05-01")],
+    );
+    assert_eq!(converted(&year_first).0, ["2024-05-01"]);
 }
 
 #[test]

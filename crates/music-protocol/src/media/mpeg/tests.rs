@@ -363,3 +363,78 @@ fn symlink_source_is_not_read() {
     std::os::unix::fs::symlink(t.0.join("target"), t.0.join("alias.mp3")).unwrap();
     assert!(read(&t.0.join("alias.mp3")).is_err());
 }
+
+#[test]
+fn an_mp3s_recording_date_and_year_must_agree_on_the_year() {
+    let t = Temp::new();
+    let year = |frames: Vec<Vec<u8>>| {
+        let names = vec![
+            frame("TIT2", b"\x00Title", 3),
+            frame("TPE1", b"\x00Artist A", 3),
+            frame("TALB", b"\x00Album", 3),
+        ];
+        let source = t.read(&tagged([names, frames].concat(), 3)).unwrap();
+        projection::project(&source).map(|m| m.year)
+    };
+    assert_eq!(
+        year(vec![
+            frame("TDRC", b"\x002010-12-20", 3),
+            frame("TYER", b"\x002010", 3)
+        ])
+        .unwrap(),
+        Some(2010)
+    );
+    assert_eq!(
+        year(vec![
+            frame("TYER", b"\x002022", 3),
+            frame("TDRC", b"\x002022", 3)
+        ])
+        .unwrap(),
+        Some(2022)
+    );
+    assert_eq!(
+        year(vec![
+            frame("TDRC", b"\x002010", 3),
+            frame("TYER", b"\x002012", 3)
+        ])
+        .unwrap_err()
+        .to_string(),
+        "release date has 2 different years in the file's tag (2010, 2012); edit the tag to keep one"
+    );
+    assert_eq!(
+        year(vec![
+            frame("TDRC", b"\x002010", 3),
+            frame("TYER", b"\x00soon", 3)
+        ])
+        .unwrap_err()
+        .to_string(),
+        "a release date must start with a four-digit year"
+    );
+}
+
+#[test]
+fn an_mp3_frame_repeated_unchanged_is_one_value() {
+    let t = Temp::new();
+    let read = |frames: Vec<Vec<u8>>| {
+        let names = vec![
+            frame("TPE1", b"\x00Artist A", 3),
+            frame("TALB", b"\x00Album", 3),
+        ];
+        let source = t.read(&tagged([names, frames].concat(), 3)).unwrap();
+        projection::project(&source)
+    };
+    let twice = read(vec![
+        frame("TIT2", b"\x00Title", 3),
+        frame("TIT2", b"\x00Title", 3),
+    ]);
+    assert_eq!(twice.unwrap().title, "Title");
+    assert_eq!(
+        read(vec![
+            frame("TIT2", b"\x00Title", 3),
+            frame("TIT2", b"\x00Other", 3)
+        ])
+        .unwrap_err()
+        .to_string(),
+        "title has 2 values in the file's tag; edit the tag to keep one"
+    );
+}

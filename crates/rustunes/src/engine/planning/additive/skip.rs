@@ -331,6 +331,18 @@ fn tag_problem(detail: &str) -> (String, String) {
     {
         return (invalid_text(field), FIX_TAG.into());
     }
+    if let Some((count, years)) = detail
+        .strip_prefix("release date has ")
+        .and_then(|rest| rest.strip_suffix("); edit the tag to keep one"))
+        .and_then(|rest| rest.split_once(" different years in the file's tag ("))
+    {
+        return (
+            format!(
+                "its release dates name {count} different years ({years}), and the phone keeps one"
+            ),
+            "Edit the tag so they name the same year.".into(),
+        );
+    }
     if let Some(field) = detail
         .strip_prefix("zero ")
         .and_then(|rest| rest.strip_suffix(" numbering"))

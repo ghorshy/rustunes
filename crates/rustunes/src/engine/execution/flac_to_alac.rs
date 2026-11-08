@@ -495,9 +495,14 @@ fn write_tags(output: &Path, prepared: &PreparedSource, cover: Option<&Cover>) -
         ilst.replace_atom(Atom::new(AtomIdent::Fourcc(id), data));
     };
     // A release date gives the year; the file keeps the date as the FLAC has
-    // it, the one that says something (an empty one is none).
+    // it. The projection has every date name one year, so the longest is the
+    // fullest (`2024-05-01` over `2024`), the first of them in file order; an
+    // empty one is none.
     let date = tag_values(&prepared.source().metadata.release_date)
-        .next()
+        .fold(None::<&str>, |fullest, date| match fullest {
+            Some(f) if f.len() >= date.len() => Some(f),
+            _ => Some(date),
+        })
         .filter(|_| m.year.is_some())
         .map(str::to_owned);
     for (id, value) in [
