@@ -16,7 +16,7 @@ use super::{
 use crate::media::{
     audio_source::Stream,
     format::Format,
-    metadata::{ScalarMetadata, tag_values},
+    metadata::{ScalarMetadata, distinct_tag_values},
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -214,10 +214,11 @@ pub fn unprojected_frames(source: &Source) -> BTreeSet<&str> {
 }
 
 /// A field's one value, as Apple's readers take one: a tag that holds the
-/// field more than once has to be edited to keep one. An empty value counts
-/// for none (`metadata::tag_value`).
+/// field with more than one value has to be edited to keep one. The same
+/// value repeated is one value, and an empty value counts for none
+/// (`metadata::tag_value`).
 fn text(values: &[String], field: &str, required: bool) -> Result<Option<String>> {
-    let values: Vec<_> = tag_values(values).collect();
+    let values = distinct_tag_values(values);
     ensure!(
         values.len() <= 1,
         "{field} has {} values in the file's tag; edit the tag to keep one",
@@ -246,12 +247,7 @@ fn valid(value: &str, field: &str) -> Result<()> {
 /// order with ", " into the one value the field holds. A single entry stays as
 /// it is, and an empty entry is no entry.
 fn joined(values: &[String], field: &str) -> Result<Vec<String>> {
-    let mut distinct: Vec<&str> = Vec::new();
-    for value in tag_values(values) {
-        if !distinct.contains(&value) {
-            distinct.push(value);
-        }
-    }
+    let distinct = distinct_tag_values(values);
     if distinct.len() > 1 {
         for value in &distinct {
             valid(value, field)?;
@@ -259,6 +255,40 @@ fn joined(values: &[String], field: &str) -> Result<Vec<String>> {
         return Ok(vec![distinct.join(", ")]);
     }
     Ok(distinct.into_iter().map(str::to_owned).collect())
+}
+
+/// The one year a tag's release dates give. Every date (`DATE`, `YEAR`,
+/// `TDRC`, `TYER`, `ICRD`) starts with a four-digit year, and a full date
+/// (`2024-05-01`, `2024-05-01T07:00:00Z`) gives its year, so `2010` and
+/// `2010-12-20` are one year. Dates of different years are refused: no field
+/// is taken over another.
+fn release_year(values: &[String]) -> Result<Option<u32>> {
+    let mut years: Vec<u32> = Vec::new();
+    for value in distinct_tag_values(values) {
+        valid(value, "release date")?;
+        ensure!(
+            value.len() >= 4
+                && value.as_bytes()[..4].iter().all(u8::is_ascii_digit)
+                && (value.len() == 4 || value.as_bytes()[4] == b'-'),
+            "a release date must start with a four-digit year"
+        );
+        let year = value[..4].parse::<u32>()?;
+        ensure!(year != 0, "zero release year");
+        if !years.contains(&year) {
+            years.push(year);
+        }
+    }
+    ensure!(
+        years.len() <= 1,
+        "release date has {} different years in the file's tag ({}); edit the tag to keep one",
+        years.len(),
+        years
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(years.first().copied())
 }
 
 fn numbering(number: Option<u32>, total: Option<u32>, field: &str) -> Result<()> {
@@ -287,20 +317,7 @@ pub fn project(source: &Source) -> Result<Metadata> {
 fn project_tags(tags: &Tags, flac: bool) -> Result<Metadata> {
     numbering(tags.track, tags.track_total, "track")?;
     numbering(tags.disc, tags.disc_total, "disc")?;
-    // A full date (`2024-05-01`, `2024-05-01T07:00:00Z`) gives its year.
-    let year = text(&tags.release_date, "release date", false)?
-        .map(|value| {
-            ensure!(
-                value.len() >= 4
-                    && value.as_bytes()[..4].iter().all(u8::is_ascii_digit)
-                    && (value.len() == 4 || value.as_bytes()[4] == b'-'),
-                "a release date must start with a four-digit year"
-            );
-            let year = value[..4].parse::<u32>()?;
-            ensure!(year != 0, "zero release year");
-            Ok(year)
-        })
-        .transpose()?;
+    let year = release_year(&tags.release_date)?;
     let genre = text(&tags.genre, "genre", false)?;
     if let Some(genre) = &genre {
         ensure!(
@@ -752,6 +769,57 @@ mod tests {
         // A number beside an empty one is the number.
         let numbered = flac(&[&names[..], &["TRACKNUMBER=", "TRACKNUMBER=3"]].concat());
         assert_eq!(numbered.metadata.track, Some(3));
+    }
+
+    #[test]
+    fn release_dates_that_agree_on_the_year_give_it_and_different_years_are_refused() {
+        let names = ["TITLE=Title", "ARTIST=Artist A", "ALBUM=Album"];
+        let year = |dates: &[&str]| project(&flac(&[&names[..], dates].concat())).map(|m| m.year);
+        assert_eq!(year(&["DATE=2026", "YEAR=2026"]).unwrap(), Some(2026));
+        assert_eq!(year(&["DATE=2010-12-20", "YEAR=2010"]).unwrap(), Some(2010));
+        assert_eq!(year(&["DATE=2010", "DATE=2010-12-20"]).unwrap(), Some(2010));
+        // Two full dates of one year are that year.
+        assert_eq!(
+            year(&["DATE=2010-11-01", "YEAR=2010-12-20"]).unwrap(),
+            Some(2010)
+        );
+        assert_eq!(
+            year(&["DATE=2010", "YEAR=2012"]).unwrap_err().to_string(),
+            "release date has 2 different years in the file's tag (2010, 2012); edit the tag to keep one"
+        );
+        // A value without a four-digit year is still no year at all.
+        assert_eq!(
+            year(&["DATE=2010", "YEAR=soon"]).unwrap_err().to_string(),
+            "a release date must start with a four-digit year"
+        );
+    }
+
+    #[test]
+    fn a_value_repeated_unchanged_is_one_value() {
+        let source = flac(&[
+            "TITLE=Title",
+            "TITLE=Title",
+            "ARTIST=Artist A",
+            "ALBUM=Album",
+            "GENRE=House",
+            "GENRE=House",
+        ]);
+        let m = project(&source).unwrap();
+        assert_eq!(
+            (m.title.as_str(), m.genre.as_deref()),
+            ("Title", Some("House"))
+        );
+        let two = flac(&[
+            "TITLE=Title",
+            "ARTIST=Artist A",
+            "ALBUM=Album",
+            "GENRE=House",
+            "GENRE=Garage",
+        ]);
+        assert_eq!(
+            project(&two).unwrap_err().to_string(),
+            "genre has 2 values in the file's tag; edit the tag to keep one"
+        );
     }
 
     /// The `tone-aac.m4a` fixture with `edit` made to its tag, read as any

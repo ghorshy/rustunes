@@ -377,6 +377,18 @@ pub fn tag_values(values: &[String]) -> impl Iterator<Item = &str> {
     values.iter().filter_map(|value| tag_value(value))
 }
 
+/// [`tag_values`] with each value once, in the order it first appears: the
+/// same value repeated says it once.
+pub fn distinct_tag_values(values: &[String]) -> Vec<&str> {
+    let mut distinct = Vec::new();
+    for value in tag_values(values) {
+        if !distinct.contains(&value) {
+            distinct.push(value);
+        }
+    }
+    distinct
+}
+
 /// The one comment a source's texts give, if any: identical texts are one
 /// comment, and line breaks and tabs may appear in it.
 pub fn comment_text<'a>(texts: &[&'a str]) -> Result<Option<&'a str>> {
