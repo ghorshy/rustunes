@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn first_value_projection_preserves_source_and_rejects_unsupported_audio() {
+    fn several_artists_are_sent_joined_and_unsupported_audio_refuses() {
         let ids = NewTrackIds {
             track: 2000,
             album: 3000,
@@ -381,7 +381,7 @@ mod tests {
                 .as_dictionary()
                 .unwrap()["artist"]
                 .as_string(),
-            Some("First artist")
+            Some("First artist; Second artist")
         );
         assert_eq!(source.artist.len(), 2);
         source.artist.pop();

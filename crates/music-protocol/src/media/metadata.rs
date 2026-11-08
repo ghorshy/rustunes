@@ -389,6 +389,75 @@ pub fn distinct_tag_values(values: &[String]) -> Vec<&str> {
     distinct
 }
 
+/// The separator a field naming several artists or composers joins them
+/// with when the host sets none.
+pub const DEFAULT_ARTIST_SEPARATOR: &str = "; ";
+
+/// The separator this process joins several artists or composers with; see
+/// [`set_artist_separator`].
+static ARTIST_SEPARATOR: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// A separator is one to sixteen bytes of text without control characters.
+pub fn check_artist_separator(separator: &str) -> Result<()> {
+    ensure!(
+        !separator.is_empty() && separator.len() <= 16 && !separator.chars().any(char::is_control),
+        "an artist separator is 1 to 16 bytes of text without control characters"
+    );
+    Ok(())
+}
+
+/// Set the separator every reading of a source's tags in this process joins
+/// several artists, composers and their sort names with. The host sets it
+/// once from its settings before it reads any source: a track read two ways
+/// would look changed. A tag's projection is a pure function of the tag and
+/// this setting.
+pub fn set_artist_separator(separator: &str) -> Result<()> {
+    check_artist_separator(separator)?;
+    *ARTIST_SEPARATOR
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(separator.to_owned());
+    Ok(())
+}
+
+/// The separator set with [`set_artist_separator`], or
+/// [`DEFAULT_ARTIST_SEPARATOR`].
+pub fn artist_separator() -> String {
+    ARTIST_SEPARATOR
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(|| DEFAULT_ARTIST_SEPARATOR.to_owned())
+}
+
+/// The one value a field naming people (artists, composers, their sort names)
+/// holds: its distinct values in file order, joined with `separator`. A tag
+/// can name several people in one field (Vorbis comments and MP4 atoms repeat
+/// it, ID3v2.4 separates values); Apple's sync keeps one, so this is the
+/// host's rule. Each value and the join are held to one value's text rules
+/// (`invalid {field} text`). An empty value is no value.
+pub fn joined_names(values: &[String], field: &str, separator: &str) -> Result<Option<String>> {
+    let distinct = distinct_tag_values(values);
+    for value in &distinct {
+        check_text(value, field)?;
+    }
+    if distinct.is_empty() {
+        return Ok(None);
+    }
+    let joined = distinct.join(separator);
+    check_text(&joined, field)?;
+    Ok(Some(joined))
+}
+
+/// A field's text held to the catalogue's rules: at most 4096 bytes, no
+/// control characters.
+pub fn check_text(value: &str, field: &str) -> Result<()> {
+    ensure!(
+        value.len() <= 4096 && !value.chars().any(char::is_control),
+        "invalid {field} text"
+    );
+    Ok(())
+}
+
 /// The one comment a source's texts give, if any: identical texts are one
 /// comment, and line breaks and tabs may appear in it.
 pub fn comment_text<'a>(texts: &[&'a str]) -> Result<Option<&'a str>> {
@@ -435,21 +504,20 @@ impl Metadata {
         Ok(())
     }
 
+    /// Repeated outer atoms of a field that keeps one value. Artists,
+    /// composers and their sort names (`©ART`, `©wrt`, `soar`, `soco`) are
+    /// joined instead; see [`joined_names`].
     pub fn duplicate_outer_atoms(&self) -> Vec<String> {
-        const SUPPORTED: [[u8; 4]; 19] = [
+        const SINGLE: [[u8; 4]; 15] = [
             *b"\xa9cmt",
             *b"sonm",
-            *b"soar",
             *b"soal",
             *b"soaa",
-            *b"soco",
             *b"\xa9nam",
-            *b"\xa9ART",
             *b"\xa9alb",
             *b"aART",
             *b"\xa9gen",
             *b"gnre",
-            *b"\xa9wrt",
             *b"cprt",
             *b"\xa9day",
             *b"rtng",
@@ -459,12 +527,21 @@ impl Metadata {
         ];
         self.standard_atom_counts
             .iter()
-            .filter(|(name, count)| **count > 1 && SUPPORTED.contains(name))
+            .filter(|(name, count)| **count > 1 && SINGLE.contains(name))
             .map(|(name, _)| name.iter().map(|b| char::from(*b)).collect())
             .collect()
     }
 
+    /// The fields an insert sends, several artists and composers joined with
+    /// this process's [`artist_separator`].
     pub fn projected(&self) -> Result<ScalarMetadata<'_>> {
+        self.projected_with(&artist_separator())
+    }
+
+    /// [`Metadata::projected`] with `separator` joining several artists,
+    /// composers and their sort names. Every other field takes the first value
+    /// that says something, as the native reader takes data-child index1.
+    pub fn projected_with(&self, separator: &str) -> Result<ScalarMetadata<'_>> {
         let duplicates = self.duplicate_outer_atoms();
         ensure!(
             duplicates.is_empty(),
@@ -476,19 +553,23 @@ impl Metadata {
             let Some(text) = tag_values(values).next() else {
                 return Ok(None);
             };
-            ensure!(
-                text.len() <= 4096 && !text.chars().any(char::is_control),
-                "invalid standard {name} text"
-            );
+            check_text(text, &format!("standard {name}"))?;
             Ok(Some(text))
+        }
+        // One name is borrowed; a join of several is kept for the process.
+        fn names<'a>(values: &'a [String], name: &str, separator: &str) -> Result<Option<&'a str>> {
+            if distinct_tag_values(values).len() <= 1 {
+                return first(values, name);
+            }
+            Ok(joined_names(values, &format!("standard {name}"), separator)?.map(interned))
         }
         Ok(ScalarMetadata {
             title: first(&self.title, "title")?.context("missing standard title")?,
-            artist: first(&self.artist, "artist")?.context("missing standard artist")?,
+            artist: names(&self.artist, "artist", separator)?.context("missing standard artist")?,
             album: first(&self.album, "album")?.context("missing standard album")?,
             album_artist: first(&self.album_artist, "album artist")?,
             genre: first(&self.genre, "genre")?,
-            composer: first(&self.composer, "composer")?,
+            composer: names(&self.composer, "composer", separator)?,
             copyright: first(&self.copyright, "copyright")?,
             year: self.year,
             content_rating: self.content_rating,
@@ -499,12 +580,29 @@ impl Metadata {
             disc_total: self.disc_total,
             comment: comment_text(&self.comment.iter().map(String::as_str).collect::<Vec<_>>())?,
             sort_title: first(&self.sort_title, "sort title")?,
-            sort_artist: first(&self.sort_artist, "sort artist")?,
+            sort_artist: names(&self.sort_artist, "sort artist", separator)?,
             sort_album: first(&self.sort_album, "sort album")?,
             sort_album_artist: first(&self.sort_album_artist, "sort album artist")?,
-            sort_composer: first(&self.sort_composer, "sort composer")?,
+            sort_composer: names(&self.sort_composer, "sort composer", separator)?,
         })
     }
+}
+
+/// `text` for the rest of the process. A [`ScalarMetadata`] borrows its
+/// fields, and a joined name is in no tag to borrow from; each distinct join
+/// is kept once, so a library's worth is a few kilobytes.
+fn interned(text: String) -> &'static str {
+    static NAMES: std::sync::Mutex<std::collections::BTreeSet<&'static str>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut names = NAMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(name) = names.get(text.as_str()) {
+        return name;
+    }
+    let name: &'static str = Box::leak(text.into_boxed_str());
+    names.insert(name);
+    name
 }
 
 #[derive(Default)]
@@ -796,7 +894,10 @@ mod tests {
         let metadata = from_mp4(&parsed, crate::media::timing::read(&mut file).unwrap()).unwrap();
         assert_eq!(metadata.title, ["Example [ATC test]"]);
         assert_eq!(metadata.artist, ["First artist", "Second artist"]);
-        assert_eq!(metadata.projected().unwrap().artist, "First artist");
+        assert_eq!(
+            metadata.projected_with("; ").unwrap().artist,
+            "First artist; Second artist"
+        );
         assert_eq!(metadata.album, ["Example album"]);
         assert!(metadata.album_artist.is_empty());
         assert_eq!(metadata.genre, ["Rap/Hip Hop"]);
@@ -1004,15 +1105,18 @@ mod tests {
         assert_eq!(refused(&"a".repeat(4097)), "invalid standard composer text");
         // An empty atom beside another of its name is still a second outer atom.
         let mut bytes = ALAC.to_vec();
-        append_outer(&mut bytes, b"\xa9ART", 1, b"\0");
+        append_outer(&mut bytes, b"\xa9alb", 1, b"\0");
         let error = parsed(bytes).unwrap().projected().unwrap_err();
         assert!(error.to_string().contains("duplicate outer"), "{error:#}");
     }
 
-    #[test]
-    fn duplicate_outer_text_is_inspectable_but_not_projectable() {
+    /// The fixture with `atoms` appended as outer atoms, read as [`read`]
+    /// reads a file.
+    fn with_outer(atoms: &[(&[u8; 4], &[u8])]) -> Metadata {
         let mut bytes = ALAC.to_vec();
-        append_outer(&mut bytes, b"\xa9ART", 1, b"Second outer artist");
+        for (name, value) in atoms {
+            append_outer(&mut bytes, name, 1, value);
+        }
         let mut file = Cursor::new(bytes);
         let layout = standard_layout(&mut file).unwrap();
         file.rewind().unwrap();
@@ -1020,8 +1124,59 @@ mod tests {
         let mut metadata =
             from_mp4(&parsed, crate::media::timing::read(&mut file).unwrap()).unwrap();
         metadata.standard_atom_counts = layout.counts;
-        assert_eq!(metadata.artist, ["First artist", "Second outer artist"]);
-        assert_eq!(metadata.duplicate_outer_atoms(), ["©ART"]);
+        metadata
+    }
+
+    #[test]
+    fn repeated_artist_and_composer_atoms_join_with_the_separator() {
+        let metadata = with_outer(&[
+            (b"\xa9ART", b"Capo Lee"),
+            (b"\xa9ART", b"First artist"),
+            (b"\xa9wrt", b"Writer A"),
+            (b"\xa9wrt", b"Writer B"),
+            (b"soar", b"First, Artist"),
+            (b"soar", b"Lee, Capo"),
+            (b"soco", b"A, Writer"),
+            (b"soco", b"B, Writer"),
+        ]);
+        assert_eq!(
+            metadata.artist,
+            ["First artist", "Capo Lee", "First artist"]
+        );
+        assert!(metadata.duplicate_outer_atoms().is_empty());
+        let s = metadata.projected_with(" & ").unwrap();
+        assert_eq!(
+            (s.artist, s.composer, s.sort_artist, s.sort_composer),
+            (
+                "First artist & Capo Lee",
+                Some("Writer A & Writer B"),
+                Some("First, Artist & Lee, Capo"),
+                Some("A, Writer & B, Writer")
+            )
+        );
+        assert_eq!(
+            metadata.projected_with("; ").unwrap().artist,
+            "First artist; Capo Lee"
+        );
+        // Each name is held to the text rules, and so is the join.
+        let tab = with_outer(&[(b"\xa9wrt", b"Writer\tB"), (b"\xa9wrt", b"Writer A")]);
+        assert_eq!(
+            tab.projected_with("; ").unwrap_err().to_string(),
+            "invalid standard composer text"
+        );
+        let long = "a".repeat(4095);
+        let over = with_outer(&[(b"\xa9wrt", long.as_bytes()), (b"\xa9wrt", b"b")]);
+        assert_eq!(
+            over.projected_with("; ").unwrap_err().to_string(),
+            "invalid standard composer text"
+        );
+    }
+
+    #[test]
+    fn other_duplicate_outer_text_is_inspectable_but_not_projectable() {
+        let metadata = with_outer(&[(b"\xa9alb", b"Second album")]);
+        assert_eq!(metadata.album, ["Example album", "Second album"]);
+        assert_eq!(metadata.duplicate_outer_atoms(), ["©alb"]);
         assert!(
             metadata
                 .projected()

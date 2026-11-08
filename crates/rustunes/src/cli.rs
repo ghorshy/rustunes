@@ -145,6 +145,11 @@ enum MetadataCommand {
 enum ConfigCommand {
     /// Set the library directory `sync` mirrors and `push` and `pull` default to; without DIR, print it.
     Library { directory: Option<PathBuf> },
+    /// Set what joins several artists or composers into the one the phone keeps (default "; "); without SEP, print it.
+    ArtistSeparator {
+        #[arg(allow_hyphen_values = true)]
+        separator: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -654,6 +659,11 @@ async fn run_parsed(cli: Cli) -> Result<ExitCode> {
         }
     ) {
         crate::engine::execution::flac_to_alac::require_ffmpeg()?;
+    }
+    // Every reading of a source's tags joins several artists with the
+    // configured separator; `config` itself reads and writes the file.
+    if !matches!(cli.command, Command::Config { .. }) {
+        config::apply()?;
     }
     let deletion_json = match &cli.command {
         Command::Prune { options, .. }
@@ -1244,6 +1254,9 @@ async fn dispatch(cli: Cli, engine: &engine::Engine) -> Result<ExitCode> {
         Command::Config {
             setting: ConfigCommand::Library { directory },
         } => config::set_library(directory.as_deref())?,
+        Command::Config {
+            setting: ConfigCommand::ArtistSeparator { separator },
+        } => config::set_artist_separator(separator.as_deref())?,
         Command::Artwork {
             file,
             snapshot,

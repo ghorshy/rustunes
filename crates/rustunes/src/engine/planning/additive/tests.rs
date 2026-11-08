@@ -2571,15 +2571,15 @@ fn a_new_flac_with_repeated_artists_and_composers_is_added_with_them_joined() {
             .metadata
             .as_ref()
             .unwrap();
-        assert_eq!(metadata.artist, "Synthetic Artist, Artist D");
+        assert_eq!(metadata.artist, "Synthetic Artist; Artist D");
         assert_eq!(
             metadata.sort_artist.as_deref(),
-            Some("Artist, Synthetic, D, Artist")
+            Some("Artist, Synthetic; D, Artist")
         );
-        assert_eq!(metadata.composer.as_deref(), Some("Artist B, Artist C"));
+        assert_eq!(metadata.composer.as_deref(), Some("Artist B; Artist C"));
         assert_eq!(
             metadata.sort_composer.as_deref(),
-            Some("B, Artist, C, Artist")
+            Some("B, Artist; C, Artist")
         );
     }
     // Any other repeated field still leaves the file out.
