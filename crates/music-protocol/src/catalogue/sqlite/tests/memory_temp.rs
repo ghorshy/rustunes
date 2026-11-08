@@ -39,7 +39,7 @@ fn saved_memory_snapshot_matches_real_legacy_catalog_and_wal_without_source_muta
 }
 
 #[test]
-fn saved_memory_input_admission_keeps_legacy_caps_while_current_stays_smaller() {
+fn saved_memory_input_admission_uses_the_same_caps_for_every_profile() {
     let fixture = Fixture::new(false);
     let path = fixture.directory.0.join("sparse-admission-only");
     let file = File::create(&path).unwrap();
@@ -63,10 +63,10 @@ fn saved_memory_input_admission_keeps_legacy_caps_while_current_stays_smaller() 
                 let limits = profile.input_limits();
                 let limit = if wal { limits.1 } else { limits.0 };
                 let admitted = source_file(&path, limit);
-                let expected = match profile {
-                    SnapshotStorage::Current => bytes <= 32 * 1024 * 1024,
-                    _ if wal => bytes <= 256 * 1024 * 1024,
-                    _ => bytes <= 64 * 1024 * 1024,
+                let expected = if wal {
+                    bytes <= 256 * 1024 * 1024
+                } else {
+                    bytes <= 64 * 1024 * 1024
                 };
                 assert_eq!(admitted.is_ok(), expected, "wal={wal},bytes={bytes}");
                 if let Ok((opened, metadata)) = admitted {
