@@ -147,9 +147,11 @@ pub(crate) fn report() -> Option<(u64, u64)> {
 }
 
 /// Reads every M4A's fingerprint and artwork on a few threads, so the
-/// sequential passes that follow find them kept. Failures are left for those
-/// passes to report.
-pub(crate) fn warm<'a>(paths: impl IntoIterator<Item = &'a Path>) {
+/// sequential passes that follow find them kept, and reports each file read
+/// as [`Observation::ReadingAhead`](crate::engine::Observation). Failures are
+/// left for those passes to report; a report the frontend cannot take stops
+/// the reads.
+pub(crate) fn warm<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Result<()> {
     let paths: Vec<&Path> = paths
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("m4a")))
@@ -159,19 +161,55 @@ pub(crate) fn warm<'a>(paths: impl IntoIterator<Item = &'a Path>) {
         .min(WORKERS)
         .min(paths.len());
     if workers < 2 {
-        return;
+        return Ok(());
     }
+    let sizes: Vec<u64> = paths
+        .iter()
+        .map(|path| std::fs::metadata(path).map_or(0, |m| m.len()))
+        .collect();
+    let total = paths.len();
+    let bytes_total = sizes.iter().sum();
+    let report = |done, bytes_done| {
+        crate::engine::observe(crate::engine::Event::Observation(
+            crate::engine::Observation::ReadingAhead {
+                done,
+                total,
+                bytes_done,
+                bytes_total,
+            },
+        ))
+    };
+    report(0, 0)?;
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
+        let (read, finished) = std::sync::mpsc::channel();
         for _ in 0..workers {
-            scope.spawn(|| {
-                while let Some(path) = paths.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let _ = fingerprint(path);
-                    let _ = artwork(path);
+            let read = read.clone();
+            let next = &next;
+            let (paths, sizes) = (&paths, &sizes);
+            scope.spawn(move || {
+                while let Some(index) =
+                    Some(next.fetch_add(1, Ordering::Relaxed)).filter(|&index| index < paths.len())
+                {
+                    let _ = fingerprint(paths[index]);
+                    let _ = artwork(paths[index]);
+                    let _ = read.send(sizes[index]);
                 }
             });
         }
-    });
+        drop(read);
+        // The observer is this thread's, so the workers' reads are reported here.
+        let (mut done, mut bytes_done) = (0, 0);
+        for bytes in finished {
+            done += 1;
+            bytes_done += bytes;
+            if let Err(error) = report(done, bytes_done) {
+                next.store(total, Ordering::Relaxed);
+                return Err(error);
+            }
+        }
+        Ok(())
+    })
 }
 
 const SCHEMA: cache_database::Schema = cache_database::Schema {
