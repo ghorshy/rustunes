@@ -132,7 +132,7 @@ fn reads_persist_across_runs_only_for_the_same_file_identity() {
     ));
     later.store(&key, &art);
 
-    // Any change to the file's identity is a miss.
+    // Any change to the stored identity (the device is not part of it) is a miss.
     for changed in [
         Key {
             ctime: (key.ctime.0, key.ctime.1 + 1),
@@ -249,4 +249,30 @@ fn a_row_stored_under_another_composite_definition_loads_with_this_builds() {
         .unwrap();
     assert!(loaded == fingerprint);
     assert_eq!(loaded.audio.sha256, loaded.audio.composite_sha256());
+}
+
+#[test]
+fn a_row_survives_a_new_device_number_for_the_same_file() {
+    // An unchanged file after a btrfs remount.
+    let dir = Temp::new("remount");
+    let path = alac(&dir.0);
+    let key = key(&path).unwrap();
+    let fingerprint = fingerprint::read(&path).unwrap();
+    let art = artwork_of(key.size);
+    let cache = dir.0.join("cache");
+    let before = Disk::new(cache.clone(), true);
+    before.store(&key, &fingerprint);
+    before.store(&key, &art);
+
+    let remounted = Key {
+        dev: key.dev ^ 0x2b,
+        ..key.clone()
+    };
+    let after = Disk::new(cache, true);
+    assert!(after.load::<fingerprint::SourceFingerprint>(&remounted) == Some(fingerprint));
+    assert!(same_artwork(
+        &after.load::<artwork::SourceArtwork>(&remounted).unwrap(),
+        &art
+    ));
+    assert_eq!(after.reused.load(Ordering::Relaxed), 2);
 }
