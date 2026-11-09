@@ -8,6 +8,8 @@
 //! f5e0f2115283e8719df383baf59d9b8a6f5a2ec39e566fbe802357f2d11e6fa9,
 //! RVAs 0x47b060 (root writer), 0x483850 (root reader), 0x483468 (zlib),
 //! 0x475a64 / 0x48142c (dataset 11), 0x487620 / 0x46b2ec (Media first).
+//! Version 2.115 is known only from a phone's copy, not from that writer
+//! ([`VERSIONS`]).
 
 use anyhow::{Context, Result, bail, ensure};
 use flate2::{Decompress, FlushDecompress, Status};
@@ -18,6 +20,37 @@ const MAX_SECTIONS: u32 = 4096;
 const ROOT_HEADER_BYTES: usize = 0xf4;
 const ANCHOR_HEADER_BYTES: usize = 0x60;
 const ANCHOR_PAYLOAD_BYTES: usize = 0x30;
+
+/// A root header's version, and whether a zlib stream follows it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Version {
+    major: u32,
+    zlib: bool,
+    minor: u32,
+}
+
+/// The versions read: the pinned writer's 1.117 and 2.117, and the 2.115 a
+/// phone held after its library was wiped and the phone updated with iTunes
+/// for Windows (iOS 27.2). In that
+/// file every field read here lay where 2.117 has it, and its database PID
+/// and Media anchor matched the phone's SQL catalogue.
+const VERSIONS: [Version; 3] = [
+    Version {
+        major: 1,
+        zlib: false,
+        minor: 117,
+    },
+    Version {
+        major: 2,
+        zlib: true,
+        minor: 117,
+    },
+    Version {
+        major: 2,
+        zlib: true,
+        minor: 115,
+    },
+];
 
 pub struct AnchorState {
     saved_media_anchor: u32,
@@ -74,8 +107,9 @@ impl ByteOrder {
     }
 }
 
-/// Accepts only the observed current root header and version: 1.117 with no
-/// compression or 2.117 with one zlib stream following the root header.
+/// Accepts only the observed root header and [`VERSIONS`]: 1.117 with no
+/// compression, or 2.117 or 2.115 with one zlib stream following the root
+/// header.
 /// Every top-level section is bounded before the saved anchor is returned.
 pub fn parse(input: &[u8]) -> Result<AnchorState> {
     ensure!(
@@ -99,23 +133,38 @@ pub fn parse(input: &[u8]) -> Result<AnchorState> {
         order.u32(input, 8)? as usize == input.len(),
         "database declared file length does not match input"
     );
-    ensure!(
-        order.u32(input, 0x10)? == 117,
-        "unsupported database minor version"
-    );
+    let version = Version {
+        major: order.u32(input, 0x0c)?,
+        zlib: match input[0xa8] {
+            0 => false,
+            1 => true,
+            _ => bail!("unsupported database major version/compression combination"),
+        },
+        minor: order.u32(input, 0x10)?,
+    };
+    if !VERSIONS.contains(&version) {
+        ensure!(
+            VERSIONS
+                .iter()
+                .any(|v| (v.major, v.zlib) == (version.major, version.zlib)),
+            "unsupported database major version/compression combination"
+        );
+        bail!(
+            "unsupported database minor version {} (rustunes reads 1.117, 2.117 and 2.115)",
+            version.minor
+        );
+    }
     let count = order.u32(input, 0x14)?;
     ensure!(
         (1..=MAX_SECTIONS).contains(&count),
         "database section count is absent or exceeds limit"
     );
     let sections = &input[ROOT_HEADER_BYTES..];
-    let anchors = match (order.u32(input, 0x0c)?, input[0xa8]) {
-        (1, 0) => parse_sections(sections, order, count),
-        (2, 1) => {
-            let inflated = inflate_sections(sections, MAX_SECTION_BYTES)?;
-            parse_sections(&inflated, order, count)
-        }
-        _ => bail!("unsupported database major version/compression combination"),
+    let anchors = if version.zlib {
+        let inflated = inflate_sections(sections, MAX_SECTION_BYTES)?;
+        parse_sections(&inflated, order, count)
+    } else {
+        parse_sections(sections, order, count)
     }?;
     Ok(AnchorState {
         saved_media_anchor: anchors[0],
@@ -307,6 +356,30 @@ mod tests {
                 assert_eq!(parsed.saved_voice_memo_anchor(), 31);
                 assert_eq!(parsed.database_pid(), 0x8172_6354_4536_2718);
             }
+        }
+    }
+
+    /// A database with one anchor section (Media 49) at `major.minor`,
+    /// zlib-compressed for major 2.
+    fn versioned(major: u32, minor: u32) -> Vec<u8> {
+        let order = ByteOrder::Little;
+        let mut bytes = database(&[anchor_section(49, order)], order, major == 2);
+        put_u32(&mut bytes, 12, major, order);
+        put_u32(&mut bytes, 16, minor, order);
+        bytes
+    }
+
+    #[test]
+    fn a_rebuilt_librarys_compressed_2_115_database_is_read_like_2_117() {
+        let parsed = parse(&versioned(2, 115)).unwrap();
+        assert_eq!(parsed.saved_media_anchor(), 49);
+        assert_eq!(parsed.saved_voice_memo_anchor(), 31);
+        // Only the version seen on a phone: not uncompressed, not its neighbours.
+        for (major, minor) in [(1, 115), (2, 114), (2, 116), (2, 118)] {
+            assert!(
+                error(&versioned(major, minor)).contains("minor version"),
+                "{major}.{minor}"
+            );
         }
     }
 
