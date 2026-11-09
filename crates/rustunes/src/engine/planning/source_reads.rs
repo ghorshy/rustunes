@@ -6,7 +6,8 @@
 //! again, and a read during which any of them changed is not kept. Uploads,
 //! pre-send checks and recovery read the bytes themselves.
 //!
-//! Across runs, reads live in `sources.sqlite`, never in a journal. A cover is
+//! Across runs, reads live in `sources.sqlite`, never in a journal, and the
+//! device is not compared: it changes at every mount on btrfs. A cover is
 //! kept once by its SHA-256 and checked against it when used. A row older than
 //! [`KEEP_DAYS`] is dropped, so an unchanged file is read once more after that.
 //! Rows outlive a change to how a build defines the ALAC fingerprint's
@@ -54,9 +55,16 @@ fn key(path: &Path) -> Option<Key> {
     })
 }
 impl Key {
+    /// The identity a row is stored under. The device number is left out
+    /// (its eight bytes are zero): btrfs gives a subvolume a new one at every
+    /// mount, so keeping it would miss every row after a reboot. Rows stored
+    /// with a device number miss once and are replaced. An unchanged path,
+    /// inode, size, mtime and ctime still name the same file. Planning trusts
+    /// that identity; a file sent from a wrong hit still fails the full-file
+    /// SHA-256 check before upload.
     fn stat(&self) -> Vec<u8> {
         [
-            self.dev.to_be_bytes(),
+            0u64.to_be_bytes(),
             self.ino.to_be_bytes(),
             self.size.to_be_bytes(),
             self.mtime.0.to_be_bytes(),
