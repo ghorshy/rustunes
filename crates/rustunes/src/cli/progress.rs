@@ -200,6 +200,8 @@ pub(super) fn line(event: &Event<'_>) -> Result<Option<String>> {
         | Event::SyncFinished(_)
         | Event::ApplyFinished(_)
         | Event::CoverFinished(_) => return Ok(None),
+        // The run's summary reports phases together, once it ends.
+        Event::PhaseFinished(_) => return Ok(None),
     }))
 }
 

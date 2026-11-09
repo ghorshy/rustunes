@@ -1120,6 +1120,8 @@ pub(crate) async fn add_all(
     let mut removed = 0;
     let mut start = 0;
     for number in 0.. {
+        let _phase =
+            crate::engine::phase::start(crate::engine::phase::Phase::SendBatch(number + 1));
         if start == total {
             break;
         }

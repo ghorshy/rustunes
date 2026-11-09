@@ -238,6 +238,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<DeviceProvider>>,
 {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::CaptureCatalogue);
     check_control(control)?;
     let capture = CaptureDirectory::create(trace)?;
     check_control(control)?;

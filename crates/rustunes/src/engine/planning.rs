@@ -37,6 +37,7 @@ impl PlanResult {
 }
 
 pub(super) fn run(request: PlanRequest<'_>, engine: &Engine) -> Result<PlanResult> {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::Plan);
     engine.check()?;
     if let Some(output) = request.output {
         ensure!(

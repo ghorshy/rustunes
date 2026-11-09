@@ -886,6 +886,8 @@ pub(crate) async fn remove_all(
     let mut settled = Vec::new();
     let mut removed = 0;
     for (number, chunk) in tracks.chunks(batch_size).enumerate() {
+        let _phase =
+            crate::engine::phase::start(crate::engine::phase::Phase::RemoveBatch(number + 1));
         crate::engine::observe(crate::engine::Event::RemovalBatchStarted {
             number: number + 1,
             batches: tracks.len().div_ceil(batch_size),

@@ -75,6 +75,7 @@ fn load_with_access(
     control: Option<&crate::engine::execution::native_insert::Control>,
     description_only: bool,
 ) -> Result<Validated> {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::CheckSavedPlan);
     if let Some(control) = control {
         control.check()?;
     }

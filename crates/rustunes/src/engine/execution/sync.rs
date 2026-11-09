@@ -540,6 +540,8 @@ pub(crate) async fn run_with(
     };
     // This invocation's covers go before the fresh sync, which plans again
     // and so finds none of them pending.
+    let covers_phase = (!covers.is_empty())
+        .then(|| crate::engine::phase::start(crate::engine::phase::Phase::SendCovers));
     for (index, (source, fingerprint, preserve_album, _)) in covers.iter().enumerate() {
         engine.check()?;
         engine.emit(Event::CheckingCover {
@@ -562,6 +564,7 @@ pub(crate) async fn run_with(
         ))
         .await?;
     }
+    drop(covers_phase);
     if let Some(batched) = batched.as_ref().filter(|b| b.others > 0) {
         engine.emit(Event::SyncContinuing {
             remaining: batched.others,

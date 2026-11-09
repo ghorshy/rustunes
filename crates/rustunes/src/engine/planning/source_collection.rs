@@ -136,6 +136,7 @@ impl Selection {
 /// itself may be hidden when deliberately supplied as the root.
 /// Children follow the reported policy. No symlink is traversed or accepted.
 pub fn select(root: &Path, options: &SelectionOptions) -> Result<Selection> {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::SelectSources);
     select_impl(root, options)
 }
 
@@ -493,12 +494,16 @@ pub fn inspect_with_progress(
     selection: &Selection,
     mut progress: impl FnMut(usize, usize) -> Result<()>,
 ) -> Result<SourceCollection> {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::InspectSources);
     let mut tracks = Vec::new();
     let mut mp3_tracks = Vec::new();
     let mut failures = Vec::new();
     let mut retained_text = 0_usize;
     progress(0, selection.files.len())?;
-    super::source_reads::warm(selection.files.iter().map(|s| s.absolute_path.as_path()));
+    {
+        let _phase = crate::engine::phase::start(crate::engine::phase::Phase::ReadM4aAhead);
+        super::source_reads::warm(selection.files.iter().map(|s| s.absolute_path.as_path()));
+    }
     let bytes_total = selection.files.iter().map(|s| s.file_bytes()).sum();
     let mut bytes_done = 0;
     for (index, source) in selection.files.iter().enumerate() {

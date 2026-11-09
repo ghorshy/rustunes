@@ -21,6 +21,8 @@ pub enum Event<'a> {
         total: usize,
     },
     ComparingSources,
+    /// A phase of the run ended: its time and the process's memory.
+    PhaseFinished(&'a super::PhaseTiming),
     PlanSaved(&'a Path),
     PlanReady(&'a PlanResult),
     /// Nothing was sent: these refusals hold the sync.

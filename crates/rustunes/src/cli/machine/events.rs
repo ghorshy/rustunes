@@ -68,6 +68,8 @@ pub(crate) fn event(event: &Event<'_>) -> Result<()> {
         }
         Event::ReadingSavedSnapshot => phase("read_snapshot", Some(line()?)),
         Event::ComparingSources => phase("compare", Some(line()?)),
+        // Phases are reported together when the run ends, with --timings.
+        Event::PhaseFinished(_) => Ok(()),
         Event::Deletion(event) => deletion(event),
         Event::ReadingCurrentState => phase("reconcile", Some(line()?)),
         Event::Observation(observation) => self::observation(observation),

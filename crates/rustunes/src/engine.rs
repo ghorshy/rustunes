@@ -16,6 +16,8 @@ mod events;
 pub mod model;
 mod observation;
 pub use observation::Observation;
+pub(crate) mod phase;
+pub use phase::PhaseTiming;
 pub(crate) mod planning;
 pub(crate) mod state;
 pub(crate) mod verification;

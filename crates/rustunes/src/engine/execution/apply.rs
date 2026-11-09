@@ -43,6 +43,7 @@ pub struct Options<'a> {
 }
 
 pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<ApplyResult> {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::Apply);
     engine.check()?;
     ensure!(
         !options.trace.try_exists()?,

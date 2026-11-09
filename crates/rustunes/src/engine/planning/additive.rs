@@ -427,6 +427,7 @@ fn build_inner_with_control(
     preserve_existing_tracks: bool,
     control: Option<&crate::engine::execution::native_insert::Control>,
 ) -> Result<Plan> {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::Compare);
     if let Some(control) = control {
         control.check()?;
     }

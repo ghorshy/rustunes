@@ -701,6 +701,7 @@ pub(crate) async fn update_all(
     control: impl Fn() -> Control,
     mut progress: impl FnMut(usize, usize) -> Result<()>,
 ) -> Result<usize> {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::UpdateMetadata);
     let mut fresh = fresh_ids()?;
     let mut tracks = 0;
     let mut planned_sessions = 0;
