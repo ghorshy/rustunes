@@ -48,6 +48,11 @@ fn frame(id: &str, data: &[u8], v: u8) -> Vec<u8> {
     ]
     .concat()
 }
+fn flagged(id: &str, data: &[u8], v: u8, flags: u16) -> Vec<u8> {
+    let mut f = frame(id, data, v);
+    f[8..10].copy_from_slice(&flags.to_be_bytes());
+    f
+}
 fn tagged(frames: Vec<Vec<u8>>, v: u8) -> Vec<u8> {
     let frames = frames.concat();
     [
@@ -436,5 +441,146 @@ fn an_mp3_frame_repeated_unchanged_is_one_value() {
         .unwrap_err()
         .to_string(),
         "title has 2 values in the file's tag; edit the tag to keep one"
+    );
+}
+#[test]
+fn a_padded_three_letter_frame_id_stays_in_the_file_unprojected() {
+    let t = Temp::new();
+    // Serato's `GEO ` and iTunes' `GP1 `: ID3v2.2 IDs padded with a space.
+    let s = t
+        .read(&tagged(
+            vec![
+                frame(
+                    "GEO ",
+                    b"\x00application/octet-stream\x00\x00Serato Overview\x00data",
+                    3,
+                ),
+                frame("GP1 ", b"\x00Gassed Bristol", 3),
+                frame("TIT2", b"\x00Show Me", 3),
+            ],
+            3,
+        ))
+        .unwrap();
+    assert_eq!(s.metadata.title, ["Show Me"]);
+    let ids: Vec<_> = s.frames.iter().map(|f| f.id.as_str()).collect();
+    assert_eq!(ids, ["GEO ", "GP1 ", "TIT2"]);
+    // A padded ID3v2.2 ID for a field rustunes reads would lose that field
+    // without a word, so it refuses.
+    for id in ["TT2 ", "TP1 ", "TAL ", "TRK ", "COM ", "PIC ", "TEN "] {
+        let bytes = tagged(vec![frame(id, b"\x00x", 3)], 3);
+        assert_eq!(
+            t.read(&bytes).unwrap_err().to_string(),
+            "ID3v2.2 frame ID for a field rustunes reads",
+            "{id:?}"
+        );
+    }
+    // Only a trailing space pads; anything else is still no frame ID.
+    for id in ["GE O", " GEO", "GE  ", "geo ", "GEO\0"] {
+        let bytes = tagged(vec![frame(id, b"\x00x", 3), frame("TIT2", b"\x00T", 3)], 3);
+        assert_eq!(
+            t.read(&bytes).unwrap_err().to_string(),
+            "invalid ID3 frame ID",
+            "{id:?}"
+        );
+    }
+}
+#[test]
+fn a_frame_status_flag_does_not_change_how_it_is_read() {
+    let t = Temp::new();
+    // Tag alter, file alter and read only preservation, as each version
+    // places them (a v2.3 `TENC` with `40 00` was seen in the wild).
+    for (v, flags) in [
+        (3, 0x8000),
+        (3, 0x4000),
+        (3, 0x2000),
+        (3, 0xe000),
+        (4, 0x4000),
+        (4, 0x2000),
+        (4, 0x1000),
+        (4, 0x7000),
+    ] {
+        let s = t
+            .read(&tagged(
+                vec![
+                    flagged("TENC", b"\x00iTunes", v, flags),
+                    flagged("TIT2", b"\x00Title", v, flags),
+                ],
+                v,
+            ))
+            .unwrap_or_else(|e| panic!("v2.{v} {flags:#06x}: {e}"));
+        assert_eq!(s.metadata.title, ["Title"], "v2.{v} {flags:#06x}");
+    }
+    // Compression, encryption, grouping identity, unsynchronisation and the
+    // flags neither version defines still refuse.
+    for (v, flags) in [
+        (3, 0x0080),
+        (3, 0x0040),
+        (3, 0x0020),
+        (3, 0x1000),
+        (3, 0x0001),
+        (4, 0x0008),
+        (4, 0x0004),
+        (4, 0x0040),
+        (4, 0x0002),
+        (4, 0x8000),
+        (4, 0x0080),
+    ] {
+        let bytes = tagged(vec![flagged("TIT2", b"\x00Title", v, flags)], v);
+        assert_eq!(
+            t.read(&bytes).unwrap_err().to_string(),
+            "unsupported ID3 frame flags",
+            "v2.{v} {flags:#06x}"
+        );
+    }
+}
+#[test]
+fn a_v24_data_length_indicator_is_read_past_and_must_match() {
+    let t = Temp::new();
+    let jpeg = [
+        0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 2, 0, 3, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, 0xff,
+        0xda, 0, 12, 3, 1, 0, 2, 0, 3, 0, 0, 63, 0, 0, 0xff, 0xd9,
+    ];
+    let apic = [b"\x00image/jpeg\x00\x03\x00".as_slice(), &jpeg].concat();
+    let indicated = |length: usize| [safe(length).as_slice(), &apic].concat();
+    // v2.4 `APIC` with flags `00 01`, nothing else applied, as store downloads write it.
+    let s = t
+        .read(&tagged(
+            vec![flagged("APIC", &indicated(apic.len()), 4, 0x0001)],
+            4,
+        ))
+        .unwrap();
+    assert_eq!((s.artwork[0].width, s.artwork[0].height), (3, 2));
+    assert_eq!(s.artwork[0].sha256, hex(&Sha256::digest(jpeg)));
+    let cover = read_front_cover(&t.0.join("test.mp3"), &s)
+        .unwrap()
+        .unwrap();
+    assert_eq!(cover.bytes(), jpeg);
+    // Beside a status flag, and on a text frame.
+    let s = t
+        .read(&tagged(
+            vec![flagged(
+                "TIT2",
+                &[safe(6).as_slice(), b"\x03Title"].concat(),
+                4,
+                0x2001,
+            )],
+            4,
+        ))
+        .unwrap();
+    assert_eq!(s.metadata.title, ["Title"]);
+    // A length that is not the rest of the body would mean a transformed one.
+    for wrong in [apic.len() - 1, apic.len() + 1, 0] {
+        let bytes = tagged(vec![flagged("APIC", &indicated(wrong), 4, 0x0001)], 4);
+        assert_eq!(
+            t.read(&bytes).unwrap_err().to_string(),
+            "ID3 data length indicator mismatch",
+            "{wrong}"
+        );
+    }
+    // Too short to hold the indicator.
+    let short = tagged(vec![flagged("TIT2", b"\x00\x00\x01", 4, 0x0001)], 4);
+    assert_eq!(
+        t.read(&short).unwrap_err().to_string(),
+        "invalid ID3 frame extent"
     );
 }

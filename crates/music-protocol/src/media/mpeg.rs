@@ -354,6 +354,11 @@ fn syncsafe(b: &[u8]) -> Result<usize> {
     );
     Ok(b.iter().fold(0, |n, v| (n << 7) | usize::from(*v)))
 }
+/// The ID3v2.2 IDs of the frames `parse_id3` reads in their v2.3/v2.4 form.
+const V22_READ_IDS: [&[u8]; 20] = [
+    b"TT2", b"TP1", b"TAL", b"TP2", b"TCO", b"TCM", b"TCR", b"TYE", b"TST", b"TSP", b"TSA", b"TS2",
+    b"TSC", b"TRK", b"TPA", b"TCP", b"TEN", b"TSS", b"COM", b"PIC",
+];
 pub(crate) type Parsed = (Tags, Option<u8>, Vec<FrameEvidence>, Vec<Picture>);
 pub(crate) fn parse_id3(bytes: &[u8]) -> Result<Parsed> {
     parse_id3_with_picture(bytes, &mut |_, _| Ok(()))
@@ -400,10 +405,18 @@ pub(crate) fn parse_id3_with_picture(
             "ID3 frame count/header bound"
         );
         let id = &bytes[offset..offset + 4];
+        // Some taggers (Serato's `GEO `, iTunes' `GP1 `) write a three-letter
+        // ID3v2.2 ID padded with a space. It stays in the file unprojected,
+        // unless it is the v2.2 form of a field read here: its value would
+        // otherwise be lost without a word.
+        let id_char = |c: &u8| c.is_ascii_uppercase() || c.is_ascii_digit();
         ensure!(
-            id.iter()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+            id[..3].iter().all(id_char) && (id_char(&id[3]) || id[3] == b' '),
             "invalid ID3 frame ID"
+        );
+        ensure!(
+            id[3] != b' ' || !V22_READ_IDS.contains(&&id[..3]),
+            "ID3v2.2 frame ID for a field rustunes reads"
         );
         let id = std::str::from_utf8(id)?.to_owned();
         let len = if version == 4 {
@@ -415,15 +428,33 @@ pub(crate) fn parse_id3_with_picture(
             len > 0 && len <= end - offset - 10,
             "invalid ID3 frame extent"
         );
+        // Status flags only say what a tagger should do with the frame when
+        // the tag or file changes; they do not change how it is read.
+        // Format flags that transform the body still refuse.
+        // ID3v2.4's data length indicator alone prefixes the body with its
+        // syncsafe length and transforms nothing.
+        let status_bits = if version == 4 { 0x70 } else { 0xe0 };
+        let has_data_length = version == 4 && bytes[offset + 9] == 0x01;
         ensure!(
-            bytes[offset + 8..offset + 10] == [0, 0],
+            bytes[offset + 8] & !status_bits == 0 && (bytes[offset + 9] == 0 || has_data_length),
             "unsupported ID3 frame flags"
         );
-        let data = &bytes[offset + 10..offset + 10 + len];
+        let body = &bytes[offset + 10..offset + 10 + len];
+        let data = if has_data_length {
+            ensure!(body.len() > 4, "invalid ID3 frame extent");
+            ensure!(
+                syncsafe(&body[..4])? == body.len() - 4,
+                "ID3 data length indicator mismatch"
+            );
+            &body[4..]
+        } else {
+            body
+        };
+        // Evidence is of the frame as it is in the file, indicator included.
         evidence.push(FrameEvidence {
             id: id.clone(),
             bytes: len,
-            sha256: hex(&Sha256::digest(data)),
+            sha256: hex(&Sha256::digest(body)),
         });
         *seen.entry(id.clone()).or_default() += 1;
         let target = match id.as_str() {
