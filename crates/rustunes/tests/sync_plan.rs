@@ -28,6 +28,7 @@ fn observer_error_stops_planning_before_reading_the_snapshot() {
         selection: &selection,
         add_only: true,
         flac_to_alac: false,
+        hand_on: false,
     });
     assert_eq!(result.err().unwrap().to_string(), "frontend output closed");
     assert!(!path.exists());

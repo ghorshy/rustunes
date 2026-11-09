@@ -25,7 +25,7 @@ const MAX_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Parsed source observations. These fields are not execution permits or ownership claims.
 /// Standard-atom provenance remains internal to the parser and its projections.
-#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Metadata {
     pub title: Vec<String>,
     pub artist: Vec<String>,

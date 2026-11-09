@@ -32,7 +32,7 @@ pub struct JournalEvidence<'a> {
     pub identity: &'a Identity,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Plan {
     pub schema: &'static str,
     pub mode: &'static str,
@@ -69,7 +69,7 @@ pub struct Plan {
     pub execution_authorized_by_plan: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct SelectionScope {
     pub base_directory: String,
     pub recursive: bool,
@@ -79,14 +79,14 @@ pub struct SelectionScope {
     pub selected_bytes: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ExcludedSource {
     pub relative_path: String,
     pub reason: &'static str,
     pub descendants_unscanned: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct MetadataComparisonScope {
     pub compared_fields: Vec<&'static str>,
     /// Raw rating/compilation values may be compared while their receiver
@@ -180,7 +180,7 @@ where
     managed_audio_tests::ordinary_audio_entrypoint_fixture(run).await;
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct SourceDecision {
     pub relative_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,7 +206,7 @@ pub struct SourceDecision {
     pub decision: Decision,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct NativeComposer {
     pub requested_label: String,
     pub wire_label: String,
@@ -216,7 +216,7 @@ pub struct NativeComposer {
 
 pub use music_protocol::media::metadata::ProjectedFields;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ExistingMatch {
     pub track_id: String,
     pub wire_id: String,
@@ -236,14 +236,14 @@ pub struct ExistingMatch {
     pub device_file_sha256: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct FieldDifference {
     pub field: &'static str,
     pub current: Value,
     pub desired: Value,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum Decision {
     Add {
@@ -278,14 +278,14 @@ pub enum Decision {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Group {
     pub id: String,
     pub wire_id: String,
     pub status: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ArtworkDecision {
     /// Finish this tool's interrupted insertion without replacing any cover.

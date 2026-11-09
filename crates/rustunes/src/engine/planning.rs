@@ -16,6 +16,9 @@ pub struct PlanRequest<'a> {
     pub add_only: bool,
     /// `--flac-to-alac`: plan FLAC additions as ALACs converted from them.
     pub flac_to_alac: bool,
+    /// Keep the plan and its inspected sources for checks later in the run
+    /// ([`PlanResult::planned`]); a plan only saved for later keeps nothing.
+    pub hand_on: bool,
 }
 pub struct PlanResult {
     pub add_only: bool,
@@ -29,6 +32,9 @@ pub struct PlanResult {
     /// without them.
     pub skipped: usize,
     pub source_exclusions: usize,
+    /// Handed on to the checks of this plan later in the same run, when
+    /// [`PlanRequest::hand_on`] asked for it.
+    pub(crate) planned: Option<saved_plan::Planned>,
 }
 impl PlanResult {
     pub fn ready(&self) -> bool {
@@ -80,6 +86,20 @@ pub(super) fn run(request: PlanRequest<'_>, engine: &Engine) -> Result<PlanResul
     let counts = plan.decision_counts();
     let mut serialized = serde_json::to_vec_pretty(&plan)?;
     serialized.push(b'\n');
+    let planned = request
+        .hand_on
+        .then(|| {
+            saved_plan::Planned::new(
+                &plan,
+                &serialized,
+                request.snapshot,
+                &snapshot,
+                journal.as_ref(),
+                &selection,
+                &sources,
+            )
+        })
+        .transpose()?;
     engine.check()?;
     if let Some(path) = request.output {
         private_write(path, &serialized)?;
@@ -101,6 +121,7 @@ pub(super) fn run(request: PlanRequest<'_>, engine: &Engine) -> Result<PlanResul
         conflicts: counts.conflicts,
         skipped: counts.skipped,
         source_exclusions: sources.exclusions.len(),
+        planned,
     })
 }
 
