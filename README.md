@@ -108,8 +108,10 @@ OpenSSL dependency.
 | | |
 | --- | --- |
 | Tested phone | iPhone 16 Pro Max (`iPhone17,2`), iOS 27.0.1 and 27.2 |
-| Tested computer | Linux x86_64 (Fedora 44) |
+| | iPhone 13 (`iPhone14,5`), iOS 27.2: planning and dry runs over USB (November 2026) |
+| Tested computer | Linux x86_64 (Fedora 44; Arch Linux, November 2026) |
 | Tested library | 419 tracks, 8.6 GB, 418 covers, over USB and Wi-Fi |
+| | 1046 files (M4A, MP3, FLAC, WAV), dry runs only, on the iPhone 13 |
 
 Other models and iOS versions have not been tested, and Apple can change the
 protocol in any iOS update. As a safeguard, rustunes reads the phone's music
