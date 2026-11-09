@@ -1015,9 +1015,9 @@ fn mp3_row(
         .values()
         .filter(|t| t.file_bytes == f.file_bytes && hex(&t.full_file_sha256) == f.full_file_sha256)
         .collect();
-    let fresh =
-        music_protocol::media::mpeg::read(&sources.base_directory.join(&source.relative_path));
-    let revalidated = fresh.as_ref().is_ok_and(|s| s == &source.source);
+    // The file as it is now, or as read before if its stat did not move.
+    let current = super::source_reads::mpeg(&sources.base_directory.join(&source.relative_path));
+    let revalidated = current.as_ref().is_ok_and(|s| s == &source.source);
     let duplicate = sources
         .mp3_tracks
         .iter()
@@ -1593,10 +1593,10 @@ pub(crate) fn uninsertable_sources(sources: &SourceCollection) -> Vec<(String, S
         }
         let refusal = unconvertible(sources, &source.source)
             .or_else(|| {
-                music_protocol::media::mpeg::read(&path)
-                    .and_then(|fresh| {
+                super::source_reads::mpeg(&path)
+                    .and_then(|current| {
                         ensure!(
-                            fresh == source.source,
+                            current == source.source,
                             "MP3 source changed since inspection"
                         );
                         Ok(())

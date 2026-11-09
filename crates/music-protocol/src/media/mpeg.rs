@@ -232,6 +232,8 @@ pub fn is_other_audio(path: &Path) -> bool {
     })
 }
 pub fn read(path: &Path) -> Result<Source> {
+    #[cfg(any(test, feature = "offline-test-support"))]
+    crate::test_support::mpeg::count_read(path);
     let before = fs::symlink_metadata(path)?;
     ensure!(
         before.is_file()

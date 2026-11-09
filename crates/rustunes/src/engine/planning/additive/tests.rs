@@ -3278,3 +3278,68 @@ fn a_journal_that_appeared_after_planning_is_planned_with_again() {
     let (_, read_again) = checked_again(&f, &engine, &read, &earlier, &journal);
     assert_eq!(read_again, 1);
 }
+
+/// The fixture's MP3, FLAC and WAV in `library/`, with their paths.
+fn other_formats(f: &DisclosureFixture) -> Vec<std::path::PathBuf> {
+    let library = f.temp.0.join("library");
+    fs::create_dir(&library).unwrap();
+    ["tone-mp3-vbr.mp3", "tone-flac.flac", "tone-wav.wav"]
+        .iter()
+        .map(|name| {
+            let path = library.join(name);
+            fs::copy(
+                format!("{}/../../tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR")),
+                &path,
+            )
+            .unwrap();
+            path
+        })
+        .collect()
+}
+
+#[test]
+fn planning_reads_each_mp3_flac_and_wav_once() {
+    let f = DisclosureFixture::new(0, 0, true);
+    let paths = other_formats(&f);
+    let (engine, _) = counting();
+    engine
+        .plan(crate::engine::PlanRequest {
+            source: &f.temp.0.join("library"),
+            snapshot: &f.temp.0.join("snapshot"),
+            journal: None,
+            output: None,
+            selection: &SelectionOptions::default(),
+            add_only: false,
+            flac_to_alac: false,
+            hand_on: false,
+        })
+        .unwrap();
+    for path in &paths {
+        assert_eq!(
+            music_protocol::test_support::mpeg::reads(path),
+            1,
+            "{}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn an_mp3_changed_after_selection_is_still_refused() {
+    let f = DisclosureFixture::new(0, 0, true);
+    let path = other_formats(&f).remove(0);
+    let selected = crate::engine::planning::source_reads::mpeg(&path).unwrap();
+    // One byte flipped: other bytes, so another full-file hash.
+    let mut bytes = fs::read(&path).unwrap();
+    let at = bytes.len() - 1;
+    bytes[at] ^= 1;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    fs::write(&path, &bytes).unwrap();
+    let error = PreparedSource::read_expected(&path, &selected)
+        .err()
+        .expect("a changed file is refused");
+    assert!(
+        format!("{error:#}").contains("changed after selection"),
+        "{error:#}"
+    );
+}
