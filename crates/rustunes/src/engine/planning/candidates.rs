@@ -20,6 +20,7 @@ pub fn generate(
     catalog: &Catalog,
     journal: Option<&Journal>,
 ) -> Result<BTreeMap<String, Candidate>> {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::AllocateCandidates);
     let (mut random, mut occupied, mut paths, folders) = allocation_context(catalog, journal)?;
     let mut candidates = BTreeMap::new();
     for source in &sources.tracks {

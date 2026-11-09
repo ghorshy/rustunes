@@ -35,3 +35,9 @@ symphonia-core = { version = "=0.5.4", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "time", "net"] }
 tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt"] }
+
+# Dependencies (hashing, decoding, SQLite) built optimised even in debug
+# builds: a debug run otherwise hashes and parses ~15x slower than release,
+# while rustunes' own code stays debuggable.
+[profile.dev.package."*"]
+opt-level = 3

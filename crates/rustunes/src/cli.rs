@@ -17,6 +17,7 @@ mod replace;
 mod source_inspection;
 pub(crate) mod source_scan;
 mod source_validation;
+mod timings;
 use crate::engine;
 use crate::engine::execution::device;
 use crate::engine::planning::additive;
@@ -80,6 +81,10 @@ struct Cli {
         value_name = "FORMAT"
     )]
     message_format: MessageFormat,
+    /// When the command ends, print how long each of its phases took and the
+    /// memory rustunes held. The run's log always keeps this summary.
+    #[arg(long, global = true)]
+    timings: bool,
     /// Print the run's log on stderr as well. Every run keeps its log in the
     /// state directory under logs; a failure keeps it under logs/failed and
     /// prints what the terminal did not show of it, and its path. -vv adds the
@@ -708,6 +713,7 @@ async fn run_parsed(cli: Cli) -> Result<ExitCode> {
         _ => false,
     };
     let engine = configured_engine_output(device_config(&cli)?, deletion_json);
+    let show_timings = cli.timings;
     let cache = fingerprint_cache(cli.full_readback);
     if let Ok(state) = default_state_directory() {
         source_reads::persist(state.join("source-cache"), !cli.full_readback);
@@ -764,6 +770,12 @@ async fn run_parsed(cli: Cli) -> Result<ExitCode> {
             format!("Source cache: {reused} reads reused, {stored} stored"),
             serde_json::json!({"cache": "source_reads", "reused": reused, "stored": stored}),
         )?;
+    }
+    // A summary that cannot be shown does not hide the command's own failure.
+    if let Err(error) = timings::report(show_timings)
+        && result.is_ok()
+    {
+        return Err(error);
     }
     if result.is_ok()
         && let Some(state) = runs_in
@@ -961,6 +973,9 @@ fn configured_engine_output(device: engine::DeviceConfig, deletion_json: bool) -
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
         move |event| {
+            if let engine::Event::PhaseFinished(phase) = &event {
+                timings::record(phase);
+            }
             logging::event(&event);
             match event {
                 _ if machine::enabled() => machine::event(&event),

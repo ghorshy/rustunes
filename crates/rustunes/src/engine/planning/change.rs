@@ -423,6 +423,7 @@ pub struct Planned {
 /// Plan a change offline from a complete snapshot; the bytes returned are the
 /// bytes saved.
 pub(crate) fn run(request: Request<'_>, engine: &Engine) -> Result<Planned> {
+    let _phase = crate::engine::phase::start(crate::engine::phase::Phase::Plan);
     engine.check()?;
     if let Some(output) = request.output {
         ensure!(
