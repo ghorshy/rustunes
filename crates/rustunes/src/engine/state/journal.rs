@@ -1829,6 +1829,78 @@ fn decode_content_as(bytes: &[u8], stored_identity: bool) -> Result<Content> {
     Ok(content)
 }
 
+impl Journal {
+    /// What this journal records as begun and not yet settled, if anything: a
+    /// batch of inserts, removals or metadata edits, or a single attempt.
+    /// Settling it reads its sources again and must find them as they were
+    /// sent.
+    pub(crate) fn unfinished(&self) -> Result<Option<&'static str>> {
+        if self.outstanding_insert_batch()?.is_some() {
+            return Ok(Some("an insert batch"));
+        }
+        if self.outstanding_removal_batch()?.is_some() {
+            return Ok(Some("a removal batch"));
+        }
+        if self.outstanding_metadata_batch()?.is_some() {
+            return Ok(Some("a metadata batch"));
+        }
+        Ok(self.outstanding_attempt()?.map(|a| match a.prepared.kind {
+            AttemptKind::Insert => "an insert",
+            AttemptKind::Artwork => "a cover update",
+        }))
+    }
+}
+
+/// Each journal under the state directory `state` with unfinished work
+/// ([`Journal::unfinished`]), with what it is. A journal lives at
+/// `devices/DEVICE/LIBRARY/journal` (`layout::journal_path`), and is opened
+/// read-only under the identity its path names, which attests no device.
+pub(crate) fn unfinished_in(state: &Path) -> Result<Vec<(PathBuf, &'static str)>> {
+    fn digest(name: &std::ffi::OsStr) -> Option<[u8; 32]> {
+        let name = name.to_str()?;
+        let mut digest = [0; 32];
+        if name.len() != 64 {
+            return None;
+        }
+        for (byte, pair) in digest.iter_mut().zip(name.as_bytes().chunks(2)) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+        Some(digest)
+    }
+    let devices = state.join("devices");
+    let mut found = Vec::new();
+    if !devices.try_exists()? {
+        return Ok(found);
+    }
+    for device in fs::read_dir(&devices)? {
+        let device = device?;
+        let Some(device_digest) = digest(&device.file_name()) else {
+            continue;
+        };
+        for library in fs::read_dir(device.path())? {
+            let library = library?;
+            let Some(library_digest) = digest(&library.file_name()) else {
+                continue;
+            };
+            let path = library.path().join("journal");
+            if !path.try_exists()? {
+                continue;
+            }
+            let identity = Identity {
+                device: device_digest,
+                library: library_digest,
+            };
+            let journal = Journal::open_read_only(&path, &identity)
+                .with_context(|| format!("reading the journal {}", path.display()))?;
+            if let Some(work) = journal.unfinished()? {
+                found.push((fs::canonicalize(&path)?, work));
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests;
 

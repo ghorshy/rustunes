@@ -757,9 +757,8 @@ mod tests {
         );
     }
 
-    /// The `tone-aac.m4a` fixture with `edit` made to its tag, read as any
-    /// source is.
-    fn aac(edit: impl FnOnce(&mut lofty::mp4::Ilst)) -> Source {
+    /// The `tone-aac.m4a` fixture's bytes with `edit` made to its tag.
+    fn aac_bytes(edit: impl FnOnce(&mut lofty::mp4::Ilst)) -> Vec<u8> {
         use lofty::{config::WriteOptions, file::AudioFile, mp4::Mp4File};
         let bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -770,11 +769,23 @@ mod tests {
         let mut mp4 = Mp4File::read_from(&mut file, Default::default()).unwrap();
         edit(mp4.ilst_mut().unwrap());
         mp4.save_to(&mut file, WriteOptions::default()).unwrap();
-        let size = file.get_ref().len() as u64;
+        file.into_inner()
+    }
+
+    /// An M4A's bytes read as any source is.
+    fn read_m4a(bytes: Vec<u8>) -> Source {
+        let size = bytes.len() as u64;
+        let mut file = Cursor::new(bytes);
         let layout = crate::media::container::inspect(&mut file, size)
             .unwrap()
             .unwrap();
         crate::media::audio_source::read_layout(&mut file, size, layout).unwrap()
+    }
+
+    /// The `tone-aac.m4a` fixture with `edit` made to its tag, read as any
+    /// source is.
+    fn aac(edit: impl FnOnce(&mut lofty::mp4::Ilst)) -> Source {
+        read_m4a(aac_bytes(edit))
     }
 
     #[test]
@@ -821,22 +832,24 @@ mod tests {
 
     #[test]
     fn repeated_m4a_artist_and_composer_atoms_are_joined() {
+        use crate::test_support::mp4::append_outer;
         use lofty::mp4::{Atom, AtomData, AtomIdent};
-        let source = aac(|tag| {
-            for (atom, first, second) in [
-                (*b"\xa9ART", "Bakey", "Capo Lee"),
-                (*b"\xa9wrt", "Writer A", "Writer B"),
-            ] {
+        // Each atom's first value; a second value inside one atom is ignored.
+        let mut file = aac_bytes(|tag| {
+            for (atom, first) in [(*b"\xa9ART", "Bakey"), (*b"\xa9wrt", "Writer A")] {
                 tag.replace_atom(Atom::new(
                     AtomIdent::Fourcc(atom),
                     AtomData::UTF8(first.into()),
                 ));
                 tag.insert(Atom::new(
                     AtomIdent::Fourcc(atom),
-                    AtomData::UTF8(second.into()),
+                    AtomData::UTF8("Ignored".into()),
                 ));
             }
         });
+        append_outer(&mut file, b"\xa9ART", 1, b"Capo Lee");
+        append_outer(&mut file, b"\xa9wrt", 1, b"Writer B");
+        let source = read_m4a(file);
         assert_eq!(source.metadata.artist, ["Bakey", "Capo Lee"]);
         let m = project(&source).unwrap();
         assert_eq!(

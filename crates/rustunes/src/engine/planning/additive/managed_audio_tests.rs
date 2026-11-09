@@ -571,25 +571,23 @@ fn managed_audio_same_encoded_retag_is_a_metadata_update() {
     let plan = plan_for(&f, &sources, true);
     assert!(matches!(row(&plan).decision, Decision::Keep));
 }
-/// `bytes` with its `©ART` atom holding `artists` as repeated outer atoms.
+/// `bytes` with its `©ART` atom holding `artists[0]`, then one repeated outer
+/// `©ART` atom for each other artist.
 fn with_artists(bytes: &[u8], artists: &[&str]) -> Vec<u8> {
-    use lofty::{
-        config::{ParseOptions, WriteOptions},
-        file::AudioFile,
-        mp4::{Atom, AtomData, AtomIdent, Mp4File},
-    };
-    let mut data = std::io::Cursor::new(bytes.to_vec());
-    let mut file = Mp4File::read_from(&mut data, ParseOptions::default()).unwrap();
-    let tag = file.ilst_mut().unwrap();
-    let _ = tag.remove(&AtomIdent::Fourcc(*b"\xa9ART"));
-    for artist in artists {
-        tag.insert(Atom::new(
-            AtomIdent::Fourcc(*b"\xa9ART"),
-            AtomData::UTF8((*artist).into()),
-        ));
+    let mut bytes = edited(
+        bytes,
+        *b"\xa9ART",
+        lofty::mp4::AtomData::UTF8(artists[0].into()),
+    );
+    for artist in &artists[1..] {
+        music_protocol::test_support::mp4::append_outer(
+            &mut bytes,
+            b"\xa9ART",
+            1,
+            artist.as_bytes(),
+        );
     }
-    file.save_to(&mut data, WriteOptions::default()).unwrap();
-    data.into_inner()
+    bytes
 }
 #[test]
 fn a_track_sent_with_another_artist_separator_is_a_metadata_update() {

@@ -126,11 +126,11 @@ pub fn mp4_tags(
         .collect();
     let tags = crate::media::mpeg::Tags {
         title: standard_text(tag, *b"\xa9nam")?,
-        artist: standard_text(tag, *b"\xa9ART")?,
+        artist: standard_names(tag, *b"\xa9ART")?,
         album: standard_text(tag, *b"\xa9alb")?,
         album_artist: standard_text(tag, *b"aART")?,
         genre: standard_text(tag, *b"\xa9gen")?,
-        composer: standard_text(tag, *b"\xa9wrt")?,
+        composer: standard_names(tag, *b"\xa9wrt")?,
         copyright: standard_text(tag, *b"cprt")?,
         release_date: standard_text(tag, *b"\xa9day")?,
         track: tag.track().filter(|number| *number > 0),
@@ -140,10 +140,10 @@ pub fn mp4_tags(
         compilation: layout.compilation,
         comments,
         sort_title: standard_text(tag, *b"sonm")?,
-        sort_artist: standard_text(tag, *b"soar")?,
+        sort_artist: standard_names(tag, *b"soar")?,
         sort_album: standard_text(tag, *b"soal")?,
         sort_album_artist: standard_text(tag, *b"soaa")?,
-        sort_composer: standard_text(tag, *b"soco")?,
+        sort_composer: standard_names(tag, *b"soco")?,
         encoder_hints: Default::default(),
     };
     let fields = layout
@@ -198,21 +198,21 @@ fn from_mp4(mp4: &Mp4File, timing: crate::media::timing::Timing) -> Result<Metad
     let tag = mp4.ilst().unwrap_or(&empty);
     Ok(Metadata {
         title: standard_text(tag, *b"\xa9nam")?,
-        artist: standard_text(tag, *b"\xa9ART")?,
+        artist: standard_names(tag, *b"\xa9ART")?,
         album: standard_text(tag, *b"\xa9alb")?,
         album_artist: standard_text(tag, *b"aART")?,
         genre: standard_text(tag, *b"\xa9gen")?,
-        composer: standard_text(tag, *b"\xa9wrt")?,
+        composer: standard_names(tag, *b"\xa9wrt")?,
         copyright: standard_text(tag, *b"cprt")?,
         release_date: standard_text(tag, *b"\xa9day")?,
         comment: tag_values(&standard_text(tag, *b"\xa9cmt")?)
             .map(str::to_owned)
             .collect(),
         sort_title: standard_text(tag, *b"sonm")?,
-        sort_artist: standard_text(tag, *b"soar")?,
+        sort_artist: standard_names(tag, *b"soar")?,
         sort_album: standard_text(tag, *b"soal")?,
         sort_album_artist: standard_text(tag, *b"soaa")?,
-        sort_composer: standard_text(tag, *b"soco")?,
+        sort_composer: standard_names(tag, *b"soco")?,
         compilation: standard_compilation(tag)?,
         standard_atom_counts: atom_counts(tag),
         year: standard_year(tag)?,
@@ -734,6 +734,31 @@ fn standard_text(tag: &Ilst, fourcc: [u8; 4]) -> Result<Vec<String>> {
         .collect()
 }
 
+/// A field naming people (`©ART`, `©wrt`, `soar`, `soco`): one value per
+/// outer atom, the first of its data children that says something, as the
+/// native reader takes data-child index1 (an atom saying nothing gives `""`).
+/// Repeated outer atoms are several names, which a projection joins
+/// ([`joined_names`]); further data children inside one atom are not.
+fn standard_names(tag: &Ilst, fourcc: [u8; 4]) -> Result<Vec<String>> {
+    tag.into_iter()
+        .filter(|atom| atom.ident() == &AtomIdent::Fourcc(fourcc))
+        .map(|atom| {
+            let mut first = String::new();
+            for value in atom.data() {
+                match value {
+                    AtomData::UTF8(value) | AtomData::UTF16(value) => {
+                        if first.is_empty() && tag_value(value).is_some() {
+                            first.clone_from(value);
+                        }
+                    }
+                    _ => anyhow::bail!("standard text atom {fourcc:?} has non-text data"),
+                }
+            }
+            Ok(first)
+        })
+        .collect()
+}
+
 impl fmt::Display for Metadata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Codec: ALAC")?;
@@ -817,39 +842,7 @@ mod tests {
 
     // Append a separate outer atom, since Lofty's public insert API merges
     // matching atoms and would conceal this reader regression.
-    fn append_outer(bytes: &mut Vec<u8>, name: &[u8; 4], data_type: u32, value: &[u8]) {
-        fn child(bytes: &[u8], mut at: usize, end: usize, name: &[u8; 4]) -> usize {
-            while at < end {
-                let size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-                assert!(size >= 8 && at + size <= end);
-                if &bytes[at + 4..at + 8] == name {
-                    return at;
-                }
-                at += size;
-            }
-            panic!("missing fixture container");
-        }
-        fn end(bytes: &[u8], at: usize) -> usize {
-            at + u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize
-        }
-        let moov = child(bytes, 0, bytes.len(), b"moov");
-        let udta = child(bytes, moov + 8, end(bytes, moov), b"udta");
-        let meta = child(bytes, udta + 8, end(bytes, udta), b"meta");
-        let ilst = child(bytes, meta + 12, end(bytes, meta), b"ilst");
-        let mut atom = ((value.len() + 24) as u32).to_be_bytes().to_vec();
-        atom.extend(name);
-        atom.extend(((value.len() + 16) as u32).to_be_bytes());
-        atom.extend(b"data");
-        atom.extend(data_type.to_be_bytes());
-        atom.extend([0; 4]);
-        atom.extend(value);
-        let inserted = atom.len() as u32;
-        bytes.splice(end(bytes, ilst)..end(bytes, ilst), atom);
-        for at in [moov, udta, meta, ilst] {
-            let size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
-            bytes[at..at + 4].copy_from_slice(&(size + inserted).to_be_bytes());
-        }
-    }
+    use crate::test_support::mp4::append_outer;
 
     #[test]
     fn repeated_outer_atoms_preserve_text_order_and_reject_ambiguous_singletons() {
@@ -893,10 +886,12 @@ mod tests {
         let parsed = Mp4File::read_from(&mut file, parse_options()).unwrap();
         let metadata = from_mp4(&parsed, crate::media::timing::read(&mut file).unwrap()).unwrap();
         assert_eq!(metadata.title, ["Example [ATC test]"]);
-        assert_eq!(metadata.artist, ["First artist", "Second artist"]);
+        // A second value inside the one ©ART atom is not a second artist:
+        // the native reader takes data-child index1.
+        assert_eq!(metadata.artist, ["First artist"]);
         assert_eq!(
             metadata.projected_with("; ").unwrap().artist,
-            "First artist; Second artist"
+            "First artist"
         );
         assert_eq!(metadata.album, ["Example album"]);
         assert!(metadata.album_artist.is_empty());
@@ -1085,7 +1080,7 @@ mod tests {
             }
         })
         .unwrap();
-        assert_eq!(m.composer, ["", "Artist B"]);
+        assert_eq!(m.composer, ["Artist B"]);
         let s = m.projected().unwrap();
         assert_eq!(
             (s.composer, s.sort_composer),
@@ -1169,6 +1164,27 @@ mod tests {
         assert_eq!(
             over.projected_with("; ").unwrap_err().to_string(),
             "invalid standard composer text"
+        );
+    }
+
+    #[test]
+    fn each_repeated_name_atom_gives_its_first_value_and_those_are_joined() {
+        // The fixture's ©ART atom, given a second data child, then a second
+        // outer ©ART atom.
+        let mut file = Cursor::new(ALAC.to_vec());
+        let mut mp4 = Mp4File::read_from(&mut file, parse_options()).unwrap();
+        mp4.ilst_mut().unwrap().insert(Atom::new(
+            AtomIdent::Fourcc(*b"\xa9ART"),
+            AtomData::UTF8("Second value, ignored".into()),
+        ));
+        mp4.save_to(&mut file, WriteOptions::default()).unwrap();
+        let mut bytes = file.into_inner();
+        append_outer(&mut bytes, b"\xa9ART", 1, b"Capo Lee");
+        let metadata = parsed(bytes).unwrap();
+        assert_eq!(metadata.artist, ["First artist", "Capo Lee"]);
+        assert_eq!(
+            metadata.projected_with("; ").unwrap().artist,
+            "First artist; Capo Lee"
         );
     }
 

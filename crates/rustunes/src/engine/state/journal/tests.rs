@@ -1034,3 +1034,24 @@ mod bindings_tests;
 mod mpeg_tests;
 
 mod carry_tests;
+
+#[test]
+fn unfinished_work_is_found_in_each_journal_under_a_state_directory() {
+    let temp = Temp::new();
+    assert!(unfinished_in(&temp.0).unwrap().is_empty());
+    let path = crate::engine::state::layout::journal_path(
+        &temp.0,
+        &scope().device_digest(),
+        &scope().library_digest(),
+    )
+    .unwrap();
+    let mut journal = Journal::create(&path, &scope()).unwrap();
+    complete_insert(&mut journal, 1);
+    drop(journal);
+    // Settled work is nothing to finish.
+    assert!(unfinished_in(&temp.0).unwrap().is_empty());
+    let mut journal = Journal::open(&path, &scope()).unwrap();
+    journal.prepare(insert(2)).unwrap();
+    drop(journal);
+    assert_eq!(unfinished_in(&temp.0).unwrap(), [(path, "an insert")]);
+}
