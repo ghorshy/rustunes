@@ -303,6 +303,7 @@ pub(super) fn event(event: &Event<'_>) {
 /// pass, which would flood the log.
 fn floods(event: &Event<'_>) -> bool {
     progress::thinned(event)
+        || progress::ahead_in_between(event)
         || matches!(
             event,
             Event::Observation(

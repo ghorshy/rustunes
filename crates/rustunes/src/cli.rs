@@ -1,3 +1,4 @@
+mod bar;
 mod cache_view;
 mod change_plan;
 pub(crate) mod completions;
@@ -613,6 +614,7 @@ pub async fn run() -> Result<ExitCode> {
     logging::finished(&result);
     result.or_else(|error| {
         // As main would print it, then what the log adds.
+        bar::clear();
         eprintln!("Error: {error:?}");
         logging::dump();
         Ok(ExitCode::FAILURE)
@@ -688,10 +690,11 @@ async fn run_parsed(cli: Cli) -> Result<ExitCode> {
     }
     if find_first && let Some((path, options)) = sources_to_warm(&cli.command) {
         // Finding and holding the phone takes seconds of waiting; the sources
-        // planning will hash are read meanwhile.
+        // planning will hash are read meanwhile. This thread has no
+        // observer, so these reads report nothing.
         std::thread::spawn(move || {
             if let Ok(selection) = source_collection::select(&path, &options) {
-                source_reads::warm(selection.files().iter().map(|s| s.path()));
+                let _ = source_reads::warm(selection.files().iter().map(|s| s.path()));
             }
         });
     }
@@ -782,6 +785,7 @@ fn notice(
     if machine::enabled() {
         machine::notice(code, level, line, fields)
     } else {
+        bar::clear();
         eprintln!("{line}");
         Ok(())
     }
@@ -941,7 +945,15 @@ fn configured_engine_output(device: engine::DeviceConfig, deletion_json: bool) -
             logging::event(&event);
             match event {
                 _ if machine::enabled() => machine::event(&event),
-                engine::Event::Deletion(event) => deletion::event(event, deletion_json),
+                // The bar shows the inspection's count until it ends.
+                engine::Event::Deletion(engine::DeletionEvent::InspectingSources {
+                    done,
+                    total,
+                }) if bar::on_a_terminal() && done < total => Ok(()),
+                engine::Event::Deletion(event) => {
+                    bar::clear();
+                    deletion::event(event, deletion_json)
+                }
                 other => progress::write(other),
             }
         },

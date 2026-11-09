@@ -502,7 +502,7 @@ pub fn inspect_with_progress(
     progress(0, selection.files.len())?;
     {
         let _phase = crate::engine::phase::start(crate::engine::phase::Phase::ReadM4aAhead);
-        super::source_reads::warm(selection.files.iter().map(|s| s.absolute_path.as_path()));
+        super::source_reads::warm(selection.files.iter().map(|s| s.absolute_path.as_path()))?;
     }
     let bytes_total = selection.files.iter().map(|s| s.file_bytes()).sum();
     let mut bytes_done = 0;

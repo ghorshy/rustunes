@@ -76,6 +76,14 @@ pub enum Observation<'a> {
         bytes_done: u64,
         bytes_total: u64,
     },
+    /// `done` of the `total` M4A sources, `bytes_done` of their `bytes_total`
+    /// bytes, were read ahead of inspection on several threads.
+    ReadingAhead {
+        done: usize,
+        total: usize,
+        bytes_done: u64,
+        bytes_total: u64,
+    },
     /// Every selected source was read: `total` files of `bytes_total` bytes.
     SourcesInspected {
         total: usize,

@@ -40,7 +40,13 @@ pub fn run(
                         .message(format!("Inspected {done}/{total} source files")),
                     );
                 }
-                if done == 0 || done == total || last.elapsed().as_secs() >= 5 {
+                // On a terminal the bar shows the count until it ends.
+                if super::bar::on_a_terminal() {
+                    if done == total {
+                        super::bar::clear();
+                        eprintln!("Inspected {done}/{total} source files");
+                    }
+                } else if done == 0 || done == total || last.elapsed().as_secs() >= 5 {
                     eprintln!("Inspected {done}/{total} source files");
                     last = std::time::Instant::now();
                 }

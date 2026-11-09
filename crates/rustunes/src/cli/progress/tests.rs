@@ -134,3 +134,134 @@ fn a_blocked_sync_also_names_the_files_it_would_skip() {
         "Nothing was sent. This must be fixed first:\n  a.m4a: the phone has more than one track with exactly its audio, and rustunes won't choose between them.\nIt would also skip 1 file:\n  big.wav: it is larger than the 64 MiB rustunes sends as one track. Encode it smaller."
     );
 }
+
+fn ahead(done: usize) -> Event<'static> {
+    Event::Observation(Observation::ReadingAhead {
+        done,
+        total: 3,
+        bytes_done: done as u64 * 10,
+        bytes_total: 30,
+    })
+}
+
+fn fingerprinted(completed: usize, reused: bool) -> Event<'static> {
+    Event::Observation(Observation::AudioFingerprinted {
+        track: 1,
+        completed,
+        total: 4,
+        bytes: 0,
+        other_codec: false,
+        reused,
+    })
+}
+
+#[test]
+fn on_a_terminal_reading_sources_draws_the_bar_by_bytes() {
+    let event = Event::Observation(Observation::InspectingSource {
+        number: 316,
+        total: 1045,
+        path: "a.m4a",
+        file_bytes: 5,
+        bytes_done: 2_100,
+        bytes_total: 5_800,
+    });
+    assert_eq!(
+        on_terminal(&event),
+        Some(Terminal::Draw(bar::Bar {
+            label: "Reading sources",
+            done: 315,
+            total: 1045,
+            bytes: Some((2_100, 5_800)),
+        }))
+    );
+    assert_eq!(
+        on_terminal(&ahead(1)),
+        Some(Terminal::Draw(bar::Bar {
+            label: "Reading M4A sources ahead",
+            done: 1,
+            total: 3,
+            bytes: Some((10, 30)),
+        }))
+    );
+    // The bar replaces the line every 5 s; the last count stays as a line.
+    // The first names the pass the bar shows.
+    for (counted, name) in [
+        (
+            (|done| Event::InspectingSources { done, total: 10 }) as fn(usize) -> Event<'static>,
+            "Reading selected sources",
+        ),
+        (
+            |done| Event::Observation(Observation::RevalidatingSources { done, total: 10 }),
+            "Revalidating planned sources",
+        ),
+    ] {
+        assert_eq!(on_terminal(&counted(0)), Some(Terminal::Begin(name)));
+        assert_eq!(on_terminal(&counted(5)), Some(Terminal::Skip));
+        assert_eq!(on_terminal(&counted(10)), Some(Terminal::End));
+    }
+    for done in [
+        Event::Observation(Observation::SourcesInspected {
+            total: 3,
+            bytes_total: 30,
+        }),
+        ahead(3),
+    ] {
+        assert_eq!(on_terminal(&done), Some(Terminal::End));
+    }
+}
+
+#[test]
+fn on_a_terminal_indexing_phone_audio_draws_the_bar_by_count() {
+    for reused in [true, false] {
+        assert_eq!(
+            on_terminal(&fingerprinted(2, reused)),
+            Some(Terminal::Draw(bar::Bar {
+                label: "Indexing phone audio",
+                done: 2,
+                total: 4,
+                bytes: None,
+            }))
+        );
+        assert_eq!(on_terminal(&fingerprinted(4, reused)), Some(Terminal::End));
+    }
+}
+
+#[test]
+fn other_lines_print_on_a_terminal_as_on_a_pipe() {
+    let warning = Event::Observation(Observation::CacheUnavailable {
+        cache: "source cache",
+        error: "locked".into(),
+    });
+    assert_eq!(on_terminal(&warning), None);
+    assert_eq!(
+        on_terminal(&Event::CheckingCover {
+            number: 1,
+            total: 2
+        }),
+        None
+    );
+}
+
+#[test]
+fn on_a_pipe_reading_ahead_prints_its_start_and_end_only() {
+    assert_eq!(
+        console_line(&ahead(0)).unwrap().as_deref(),
+        Some("Reading 3 M4A sources ahead on several threads")
+    );
+    assert_eq!(console_line(&ahead(1)).unwrap(), None);
+    assert_eq!(
+        console_line(&ahead(3)).unwrap().as_deref(),
+        Some("Read 3/3 M4A sources ahead")
+    );
+    // As before: every 5 s, and each copied track.
+    assert_eq!(
+        console_line(&Event::InspectingSources { done: 5, total: 10 })
+            .unwrap()
+            .as_deref(),
+        Some("Inspected 5/10 selected sources")
+    );
+    assert_eq!(
+        console_line(&fingerprinted(2, false)).unwrap().as_deref(),
+        Some("Fingerprinted 2/4 tracks; 0 bytes verified")
+    );
+}

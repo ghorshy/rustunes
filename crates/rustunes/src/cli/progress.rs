@@ -1,4 +1,5 @@
 //! Terminal rendering for typed engine observations.
+use super::bar;
 use crate::engine::{
     ApplyResult, CoverResult, Event, Observation, Skipped, SyncHolds, SyncOutcome, SyncResult,
     execution::device,
@@ -8,8 +9,136 @@ use anyhow::Result;
 /// Terminal output for an engine event. `configured_engine_output` sends
 /// `--message-format json` output and deletion events elsewhere first.
 pub(crate) fn write(event: Event<'_>) -> Result<()> {
-    if thinned(&event) {
+    if bar::on_a_terminal() {
+        match on_terminal(&event) {
+            Some(Terminal::Draw(progress)) => {
+                bar::draw(&progress);
+                return Ok(());
+            }
+            Some(Terminal::Begin(label)) => {
+                bar::name_pass(Some(label));
+                return Ok(());
+            }
+            Some(Terminal::Skip) => return Ok(()),
+            Some(Terminal::End) => {
+                bar::clear();
+                if matches!(
+                    event,
+                    Event::Observation(Observation::SourcesInspected { .. })
+                ) {
+                    bar::name_pass(None);
+                }
+            }
+            None => {}
+        }
+    }
+    if let Some(line) = console_line(&event)? {
+        bar::clear();
+        eprintln!("{line}");
         return Ok(());
+    }
+    match event {
+        Event::PlanReady(result) => {
+            bar::clear();
+            super::render_plan(result, false, result.add_only)?
+        }
+        Event::SyncFinished(result) => {
+            bar::clear();
+            for line in finished(result) {
+                println!("{line}");
+            }
+        }
+        Event::ApplyFinished(result) => {
+            bar::clear();
+            println!("{}", applied(&result))
+        }
+        Event::CoverFinished(result) => {
+            bar::clear();
+            println!("{}", covered(&result))
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// What a progress event does on a terminal instead of printing its line;
+/// None for an event that prints as it would on a pipe.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Terminal {
+    /// Draw the bar in place.
+    Draw(bar::Bar),
+    /// A pass over the sources begins: its bar takes this name.
+    Begin(&'static str),
+    /// Print nothing: the bar shows it.
+    Skip,
+    /// The step the bar showed ended: clear it, then print as on a pipe.
+    End,
+}
+
+pub(super) fn on_terminal(event: &Event<'_>) -> Option<Terminal> {
+    let bytes_bar = |label, done, total, bytes_done, bytes_total| {
+        Terminal::Draw(bar::Bar {
+            label,
+            done,
+            total,
+            bytes: Some((bytes_done, bytes_total)),
+        })
+    };
+    Some(match *event {
+        Event::Observation(Observation::InspectingSource {
+            number,
+            total,
+            bytes_done,
+            bytes_total,
+            ..
+        }) => bytes_bar(bar::SOURCES, number - 1, total, bytes_done, bytes_total),
+        Event::Observation(Observation::ReadingAhead {
+            done,
+            total,
+            bytes_done,
+            bytes_total,
+        }) if done < total => bytes_bar(
+            "Reading M4A sources ahead",
+            done,
+            total,
+            bytes_done,
+            bytes_total,
+        ),
+        Event::Observation(Observation::AudioFingerprinted {
+            completed, total, ..
+        }) if completed < total => Terminal::Draw(bar::Bar {
+            label: "Indexing phone audio",
+            done: completed,
+            total,
+            bytes: None,
+        }),
+        Event::InspectingSources { done: 0, total } if total > 0 => {
+            Terminal::Begin("Reading selected sources")
+        }
+        Event::Observation(Observation::RevalidatingSources { done: 0, total }) if total > 0 => {
+            Terminal::Begin("Revalidating planned sources")
+        }
+        Event::InspectingSources { done, total }
+        | Event::Observation(Observation::RevalidatingSources { done, total })
+            if done < total =>
+        {
+            Terminal::Skip
+        }
+        Event::InspectingSources { .. }
+        | Event::Observation(
+            Observation::RevalidatingSources { .. }
+            | Observation::ReadingAhead { .. }
+            | Observation::AudioFingerprinted { .. }
+            | Observation::SourcesInspected { .. },
+        ) => Terminal::End,
+        _ => return None,
+    })
+}
+
+/// The line an event prints on stderr where no bar is drawn, if any.
+pub(super) fn console_line(event: &Event<'_>) -> Result<Option<String>> {
+    if thinned(event) {
+        return Ok(None);
     }
     // Progress only `--message-format json` reports.
     if let Event::Observation(
@@ -19,24 +148,21 @@ pub(crate) fn write(event: Event<'_>) -> Result<()> {
         | Observation::SourcesInspected { .. },
     ) = event
     {
-        return Ok(());
+        return Ok(None);
     }
-    if let Some(line) = line(&event)? {
-        eprintln!("{line}");
-        return Ok(());
+    if ahead_in_between(event) {
+        return Ok(None);
     }
-    match event {
-        Event::PlanReady(result) => super::render_plan(result, false, result.add_only)?,
-        Event::SyncFinished(result) => {
-            for line in finished(result) {
-                println!("{line}");
-            }
-        }
-        Event::ApplyFinished(result) => println!("{}", applied(&result)),
-        Event::CoverFinished(result) => println!("{}", covered(&result)),
-        _ => {}
-    }
-    Ok(())
+    line(event)
+}
+
+/// A read-ahead's report between its first and its last.
+pub(super) fn ahead_in_between(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Observation(Observation::ReadingAhead { done, total, .. })
+            if *done != 0 && done != total
+    )
 }
 
 /// A cached pass's per-track line that is not printed: one line per track
@@ -349,6 +475,12 @@ pub(super) fn observation_line(event: &Observation<'_>) -> String {
     match event {
         Observation::CapturingCatalogue => "Copying the phone's Music catalogue".into(),
         Observation::SourcesInspected { total, .. } => format!("Inspected {total} sources"),
+        Observation::ReadingAhead { done: 0, total, .. } => {
+            format!("Reading {total} M4A sources ahead on several threads")
+        }
+        Observation::ReadingAhead { done, total, .. } => {
+            format!("Read {done}/{total} M4A sources ahead")
+        }
         Observation::RevalidatingSources { done, total } => {
             format!("Revalidated {done}/{total} planned sources")
         }

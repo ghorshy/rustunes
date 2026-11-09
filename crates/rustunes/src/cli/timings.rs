@@ -53,6 +53,7 @@ pub(crate) fn report(shown: bool) -> Result<()> {
             serde_json::json!({ "phases": phases }),
         )
     } else {
+        super::bar::clear();
         for line in &lines {
             eprintln!("{line}");
         }

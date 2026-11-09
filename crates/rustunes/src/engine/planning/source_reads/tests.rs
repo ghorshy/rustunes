@@ -276,3 +276,37 @@ fn a_row_survives_a_new_device_number_for_the_same_file() {
     ));
     assert_eq!(after.reused.load(Ordering::Relaxed), 2);
 }
+
+#[test]
+fn reading_ahead_reports_each_m4a_and_its_bytes() {
+    let dir = Temp::new("ahead");
+    for (name, size) in [("a.m4a", 100), ("b.M4A", 50), ("c.mp3", 70)] {
+        std::fs::write(dir.0.join(name), vec![0; size]).unwrap();
+    }
+    let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    let engine = crate::engine::Engine::new(crate::engine::test_engine().config, move |event| {
+        if let crate::engine::Event::Observation(crate::engine::Observation::ReadingAhead {
+            done,
+            total,
+            bytes_done,
+            bytes_total,
+        }) = event
+        {
+            sink.lock()
+                .unwrap()
+                .push((done, total, bytes_done, bytes_total));
+        }
+        Ok(())
+    });
+    let paths = ["a.m4a", "b.M4A", "c.mp3"].map(|name| dir.0.join(name));
+    engine
+        .with_observer(|| warm(paths.iter().map(PathBuf::as_path)))
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert_eq!(seen[0], (0, 2, 0, 150), "the MP3 is not read ahead");
+    assert_eq!(seen[2], (2, 2, 150, 150));
+    assert_eq!(seen[1].0, 1);
+    assert!([100, 50].contains(&seen[1].2), "{seen:?}");
+}

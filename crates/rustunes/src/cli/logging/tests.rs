@@ -106,6 +106,17 @@ fn per_chunk_progress_and_a_cached_pass_are_thinned() {
     assert!(!floods(&Event::Observation(
         Observation::CapturingCatalogue
     )));
+    let ahead = |done| {
+        Event::Observation(Observation::ReadingAhead {
+            done,
+            total: 3,
+            bytes_done: 0,
+            bytes_total: 30,
+        })
+    };
+    assert!(!floods(&ahead(0)));
+    assert!(floods(&ahead(1)));
+    assert!(!floods(&ahead(3)));
 }
 
 #[test]

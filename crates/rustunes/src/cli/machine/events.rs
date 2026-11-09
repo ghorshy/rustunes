@@ -555,6 +555,16 @@ fn observation(event: &Observation<'_>) -> Result<()> {
                 .current(json!({"path": path, "bytes_total": file_bytes}))
                 .message(line),
         ),
+        Observation::ReadingAhead {
+            done,
+            total,
+            bytes_done,
+            bytes_total,
+        } => progress(
+            Progress::new(inspecting(), "files", *done, Some(*total))
+                .bytes(*bytes_done, Some(*bytes_total))
+                .message(line),
+        ),
         Observation::SourcesInspected { total, bytes_total } => {
             let phase = inspecting();
             tally().inspecting = None;
