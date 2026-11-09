@@ -193,7 +193,8 @@ async fn caller_cancellation_and_deadline_refuse_before_state_or_device_work() {
                 output: Some(&plan),
                 selection: &selection,
                 add_only: false,
-                flac_to_alac: false
+                flac_to_alac: false,
+                hand_on: false,
             })
             .err()
             .unwrap()
@@ -382,6 +383,7 @@ fn frontend_observer_error_stops_planning_before_opening_saved_inputs() {
             selection: &SelectionOptions::default(),
             add_only: false,
             flac_to_alac: false,
+            hand_on: false,
         })
         .err()
         .unwrap();

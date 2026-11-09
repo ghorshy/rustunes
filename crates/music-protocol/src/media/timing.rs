@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 const MAX_BOXES: usize = 128;
 const MAX_TIME_ENTRIES: u32 = 65_536;
 
-#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Timing {
     pub timescale: u32,
     pub duration_ticks: u64,

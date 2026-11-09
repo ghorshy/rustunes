@@ -480,6 +480,7 @@ pub(crate) async fn run(
                 selection: &selection,
                 add_only: true,
                 flac_to_alac,
+                hand_on: false,
             })
         })
         .await
@@ -830,6 +831,7 @@ async fn changed_audio(
             selection: &selection,
             add_only: false,
             flac_to_alac,
+            hand_on: false,
         })
     })
     .await

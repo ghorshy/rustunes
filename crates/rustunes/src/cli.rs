@@ -1839,6 +1839,7 @@ pub(crate) fn plan_command(
         selection: options,
         add_only,
         flac_to_alac,
+        hand_on: false,
     })?;
     if machine::enabled() {
         if !result.ready() {

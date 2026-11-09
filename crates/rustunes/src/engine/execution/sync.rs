@@ -227,7 +227,7 @@ pub(crate) async fn run_with(
         .collect();
     let planning_engine = engine.clone();
     let ready = tokio::task::spawn_blocking(move || {
-        let report = planning_engine.plan(PlanRequest {
+        let mut report = planning_engine.plan(PlanRequest {
             source: &source,
             snapshot: &saved_path,
             journal: journal_option.as_deref(),
@@ -235,14 +235,17 @@ pub(crate) async fn run_with(
             selection: &plan_options,
             add_only,
             flac_to_alac,
+            hand_on: true,
         })?;
         planning_engine.emit(Event::PlanReady(&report))?;
+        // Checking the saved plan later in this run starts from it.
+        let planned = report.planned.take();
         let skipped = Skipped::planned(&report.plan);
         // The plan was made with the removals' tracks on the phone; one it
         // matches must go first, and the sync plan again without it.
         let preserved = &report.plan.preserved_unmatched_device_tracks;
         if left.iter().any(|track| !preserved.contains(track)) {
-            return Ok::<_, anyhow::Error>((None, Vec::new(), skipped, true));
+            return Ok::<_, anyhow::Error>((None, Vec::new(), skipped, true, planned));
         }
         if let Some(pinned) = &pinned {
             pinned.check_sync(&report.plan)?;
@@ -253,13 +256,20 @@ pub(crate) async fn run_with(
                 metadata_batch::source_updates(&report.plan)?,
                 skipped,
                 false,
+                planned,
             ));
         }
-        Ok((Some(holds(&report.plan)), Vec::new(), skipped, false))
+        Ok((
+            Some(holds(&report.plan)),
+            Vec::new(),
+            skipped,
+            false,
+            planned,
+        ))
     })
     .await
     .context("planning task failed")??;
-    let (held, updates, mut skipped, remove_first) = ready;
+    let (held, updates, mut skipped, remove_first, planned) = ready;
     let descriptor = serde_json::json!({"schema":"rustunes.run", "snapshot":snapshot_path,
         "journal":journal,"plan":plan,"dry_run":options.dry_run});
     private_write(
@@ -324,6 +334,7 @@ pub(crate) async fn run_with(
                 trace: &run.join("preflight"),
                 host_name: options.host_name,
                 dry_run: true,
+                planned: planned.as_ref(),
             },
             engine,
         ))
@@ -334,7 +345,8 @@ pub(crate) async fn run_with(
         return Ok(result);
     }
     // Retain exact source expectations before the audio phase changes the journal.
-    let checked = saved_plan::load_sync_expectations(&plan, &snapshot_path, &journal)?;
+    let checked =
+        saved_plan::load_sync_expectations(&plan, &snapshot_path, &journal, planned.as_ref())?;
     // With a batch size of one, only MP3s are batched (one per batch).
     let mut batched = Some(insert_batch::members(&checked, options.batch_size)?)
         .filter(|b| !b.members.is_empty());
@@ -531,6 +543,7 @@ pub(crate) async fn run_with(
                     trace: &run.join("audio"),
                     host_name: options.host_name,
                     dry_run: false,
+                    planned: planned.as_ref(),
                 },
                 engine,
             ))

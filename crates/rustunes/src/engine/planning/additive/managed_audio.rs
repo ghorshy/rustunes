@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ManagedAudioReplacement {
     pub classification: &'static str,
     pub refusal: Option<String>,

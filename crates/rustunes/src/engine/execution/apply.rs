@@ -40,6 +40,8 @@ pub struct Options<'a> {
     pub trace: &'a Path,
     pub host_name: &'a str,
     pub dry_run: bool,
+    /// The plan as this run made it, so it is not inspected and made again.
+    pub planned: Option<&'a saved_plan::Planned>,
 }
 
 pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<ApplyResult> {
@@ -55,6 +57,7 @@ pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<ApplyRe
         options.snapshot,
         options.journal,
         &long_control,
+        options.planned,
     )?;
     // Exact description eligibility is still separate from physical/native authority.
     ensure_supported_additions(&validated.plan.sources, &validated.sources, options.dry_run)?;

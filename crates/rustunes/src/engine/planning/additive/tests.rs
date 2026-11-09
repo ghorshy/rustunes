@@ -2781,6 +2781,7 @@ fn a_refused_flac_is_left_out_and_the_rest_of_its_album_goes_together() {
         skipped: counts.skipped,
         source_exclusions: 0,
         plan,
+        planned: None,
     };
     let report = crate::cli::plan_report(&result);
     assert_eq!(report["ready"], true);
@@ -3152,4 +3153,128 @@ fn an_aac_too_large_to_send_is_skipped_for_its_size() {
         serde_json::to_string(&plan.sources[0].decision).unwrap()
     );
     assert!(!plan.has_conflicts());
+}
+
+/// Plan the fixture's source with `engine`, saving the plan to `plan.json`.
+fn planned(f: &DisclosureFixture, engine: &crate::engine::Engine) -> crate::engine::PlanResult {
+    engine
+        .plan(crate::engine::PlanRequest {
+            source: &f.temp.0.join("covered.m4a"),
+            snapshot: &f.temp.0.join("snapshot"),
+            journal: None,
+            output: Some(&f.temp.0.join("plan.json")),
+            selection: &SelectionOptions::default(),
+            add_only: false,
+            flac_to_alac: false,
+            hand_on: true,
+        })
+        .unwrap()
+}
+
+/// An engine that counts the sources it reads, and the count.
+fn counting() -> (
+    crate::engine::Engine,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::{Arc, atomic::AtomicUsize};
+    let read = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&read);
+    let engine = crate::engine::Engine::new(crate::engine::test_engine().config, move |event| {
+        if let crate::engine::Event::Observation(crate::engine::Observation::InspectingSource {
+            ..
+        }) = event
+        {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    });
+    (engine, read)
+}
+
+/// Check the saved plan again, as a sync does after planning, with what
+/// planning handed on; how many sources it read.
+fn checked_again(
+    f: &DisclosureFixture,
+    engine: &crate::engine::Engine,
+    read: &std::sync::atomic::AtomicUsize,
+    earlier: &crate::engine::PlanResult,
+    journal: &std::path::Path,
+) -> (anyhow::Result<Value>, usize) {
+    read.store(0, std::sync::atomic::Ordering::Relaxed);
+    let checked = engine.with_observer(|| {
+        crate::engine::planning::saved_plan::load_sync_expectations(
+            &f.temp.0.join("plan.json"),
+            &f.temp.0.join("snapshot"),
+            journal,
+            earlier.planned.as_ref(),
+        )
+    });
+    (
+        checked.map(|v| serde_json::to_value(&v.plan).unwrap()),
+        read.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+#[test]
+fn a_plan_made_in_this_run_is_checked_again_without_reading_its_sources() {
+    let f = DisclosureFixture::new(0, 0, true);
+    let (engine, read) = counting();
+    let earlier = planned(&f, &engine);
+    assert_eq!(read.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let journal = f.temp.0.join("absent-journal");
+    let (plan, read_again) = checked_again(&f, &engine, &read, &earlier, &journal);
+    assert_eq!(plan.unwrap(), serde_json::to_value(&earlier.plan).unwrap());
+    assert_eq!(read_again, 0);
+}
+
+#[test]
+fn a_source_whose_stat_changed_is_inspected_and_planned_again() {
+    let f = DisclosureFixture::new(0, 0, true);
+    let (engine, read) = counting();
+    let earlier = planned(&f, &engine);
+    let source = f.temp.0.join("covered.m4a");
+    let modified = fs::metadata(&source).unwrap().modified().unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_modified(modified - std::time::Duration::from_secs(60))
+        .unwrap();
+    let journal = f.temp.0.join("absent-journal");
+    let (plan, read_again) = checked_again(&f, &engine, &read, &earlier, &journal);
+    // Same bytes, so the plan it makes again is the same.
+    assert_eq!(plan.unwrap(), serde_json::to_value(&earlier.plan).unwrap());
+    assert_eq!(read_again, 1);
+}
+
+#[test]
+fn another_plan_file_is_inspected_and_planned_again() {
+    let f = DisclosureFixture::new(0, 0, true);
+    let (engine, read) = counting();
+    let earlier = planned(&f, &engine);
+    // The same plan, written compactly: other bytes than planning wrote.
+    let path = f.temp.0.join("plan.json");
+    let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let journal = f.temp.0.join("absent-journal");
+    let (plan, read_again) = checked_again(&f, &engine, &read, &earlier, &journal);
+    assert_eq!(plan.unwrap(), value);
+    assert_eq!(read_again, 1);
+}
+
+#[test]
+fn a_journal_that_appeared_after_planning_is_planned_with_again() {
+    let f = DisclosureFixture::new(0, 0, true);
+    let (engine, read) = counting();
+    let earlier = planned(&f, &engine);
+    let snapshot = &f.snapshot;
+    let identity = crate::engine::state::journal::Identity::for_saved_device(
+        snapshot.identity.device_identifier_sha256,
+        &music_protocol::catalogue::identity::parse(&snapshot.raw_preferences).unwrap(),
+    )
+    .unwrap();
+    let journal = f.temp.0.join("journal");
+    drop(crate::engine::state::journal::Journal::create(&journal, &identity).unwrap());
+    let (_, read_again) = checked_again(&f, &engine, &read, &earlier, &journal);
+    assert_eq!(read_again, 1);
 }

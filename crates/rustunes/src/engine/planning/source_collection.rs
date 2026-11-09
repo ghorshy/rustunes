@@ -66,7 +66,7 @@ impl ExclusionReason {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Exclusion {
     pub relative_path: String,
     pub reason: ExclusionReason,
@@ -98,6 +98,10 @@ impl SelectedSource {
     }
     pub fn file_bytes(&self) -> u64 {
         self.discovered.len()
+    }
+    /// The file's stat when it was selected.
+    pub fn metadata(&self) -> &FileMetadata {
+        &self.discovered
     }
 }
 
@@ -390,11 +394,13 @@ fn validate_relative(path: &str) -> Result<()> {
 
 pub mod mp3;
 
+#[derive(Clone)]
 pub struct Mp3Track {
     pub relative_path: String,
     pub source: music_protocol::media::mpeg::Source,
 }
 
+#[derive(Clone)]
 pub struct SourceTrack {
     pub relative_path: String,
     pub fingerprint: fingerprint::SourceFingerprint,
@@ -402,12 +408,13 @@ pub struct SourceTrack {
     pub metadata: metadata::Metadata,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct InspectionFailure {
     pub relative_path: String,
     pub message: String,
 }
 
+#[derive(Clone)]
 pub struct DuplicateGroup {
     pub encoded_alac_sha256: [u8; 32],
     pub relative_paths: Vec<String>,
@@ -415,6 +422,7 @@ pub struct DuplicateGroup {
     pub identical_standard_metadata: bool,
 }
 
+#[derive(Clone)]
 pub struct SourceCollection {
     pub root: PathBuf,
     pub base_directory: PathBuf,

@@ -153,14 +153,14 @@ pub enum Decode {
     Failed,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Issue {
     pub severity: Severity,
     pub code: &'static str,
     pub message: String,
 }
 
-#[derive(Serialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Error,
