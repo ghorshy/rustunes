@@ -310,3 +310,22 @@ fn reading_ahead_reports_each_m4a_and_its_bytes() {
     assert_eq!(seen[1].0, 1);
     assert!([100, 50].contains(&seen[1].2), "{seen:?}");
 }
+
+#[test]
+fn an_unchanged_mp3_is_read_once_and_a_changed_one_again() {
+    let dir = Temp::new("mpeg");
+    let path = dir.0.join("tone.mp3");
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/tone-mp3-vbr.mp3"
+    );
+    std::fs::copy(fixture, &path).unwrap();
+    let first = mpeg(&path).unwrap();
+    assert_eq!(mpeg(&path).unwrap(), first);
+    assert_eq!(music_protocol::test_support::mpeg::reads(&path), 1);
+    // The same bytes written again: the stat moves, so it is read again.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    std::fs::copy(fixture, &path).unwrap();
+    assert_eq!(mpeg(&path).unwrap(), first);
+    assert_eq!(music_protocol::test_support::mpeg::reads(&path), 2);
+}

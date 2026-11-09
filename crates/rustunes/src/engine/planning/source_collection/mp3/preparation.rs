@@ -216,7 +216,7 @@ impl PreparedSource {
             path.display(),
             expected.fingerprint.file_bytes
         );
-        let source = music_protocol::media::mpeg::read(path)
+        let source = crate::engine::planning::source_reads::mpeg(path)
             .with_context(|| format!("reading MPEG source {}", path.display()))?;
         ensure!(
             &source == expected,

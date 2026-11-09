@@ -216,7 +216,7 @@ pub fn inspect(path: &Path, decode: bool) -> Report {
     // An M4A that is not ALAC may be AAC, which the other reader takes.
     let other = music_protocol::media::mpeg::is_other_audio(path)
         || (super::source_reads::fingerprint(path).is_err()
-            && music_protocol::media::mpeg::read(path).is_ok());
+            && super::source_reads::mpeg(path).is_ok());
     if other {
         // Every source this reader takes goes in an insert batch.
         report.profile = if music_protocol::media::mpeg::is_mp3(path) {
@@ -225,7 +225,7 @@ pub fn inspect(path: &Path, decode: bool) -> Report {
             OTHER_PROFILE
         };
         report.mp3_library_eligibility = Some("not_checked");
-        match music_protocol::media::mpeg::read(path) {
+        match super::source_reads::mpeg(path) {
             Ok(source) => {
                 report.profile = if source.stream.is_none() {
                     MPEG1_PROFILE
@@ -339,7 +339,7 @@ fn inspect_inner(path: &Path, decode: bool, report: &mut Report) -> Result<()> {
         "source must be a regular nonsymlink file"
     );
     let fingerprint = super::source_reads::fingerprint(path)
-        .map_err(|error| match music_protocol::media::mpeg::read(path) {
+        .map_err(|error| match super::source_reads::mpeg(path) {
             Err(other) => crate::engine::planning::source_collection::refused_m4a(error, &other),
             Ok(_) => error,
         })

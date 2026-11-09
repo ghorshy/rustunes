@@ -3,7 +3,8 @@
 //! revalidation and a dry run's live preflight read the same files seconds
 //! apart, and the next run reads them again; each read hashes the whole file.
 //! A file whose path, device, inode, size, mtime or ctime changed is read
-//! again, and a read during which any of them changed is not kept. Uploads,
+//! again, and a read during which any of them changed is not kept. Reads of
+//! every other format ([`mpeg`]) are kept for this process only. Uploads,
 //! pre-send checks and recovery read the bytes themselves.
 //!
 //! Across runs, reads live in `sources.sqlite`, never in a journal, and the
@@ -19,6 +20,7 @@ use crate::engine::state::cache_database;
 use anyhow::{Result, ensure};
 use music_protocol::media::artwork;
 use music_protocol::media::fingerprint;
+use music_protocol::media::mpeg;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::{
@@ -81,11 +83,34 @@ impl Key {
 
 static FINGERPRINTS: Mutex<Option<HashMap<Key, fingerprint::SourceFingerprint>>> = Mutex::new(None);
 static ARTWORK: Mutex<Option<HashMap<Key, artwork::SourceArtwork>>> = Mutex::new(None);
+static MPEG: Mutex<Option<HashMap<Key, mpeg::Source>>> = Mutex::new(None);
 static DISK: OnceLock<Disk> = OnceLock::new();
 
 fn kept<T: Clone + Persisted>(
     store: &Mutex<Option<HashMap<Key, T>>>,
     path: &Path,
+    read: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
+    remembered(
+        store,
+        path,
+        |key| DISK.get().and_then(|disk| disk.load::<T>(key)),
+        |key, value| {
+            if let Some(disk) = DISK.get() {
+                disk.store(key, value);
+            }
+        },
+        read,
+    )
+}
+
+/// `read` of `path`, unless `store` or `load` has it for the file's current
+/// stat; a read during which the stat stayed is kept, and passed to `save`.
+fn remembered<T: Clone>(
+    store: &Mutex<Option<HashMap<Key, T>>>,
+    path: &Path,
+    load: impl FnOnce(&Key) -> Option<T>,
+    save: impl FnOnce(&Key, &T),
     read: impl FnOnce(&Path) -> Result<T>,
 ) -> Result<T> {
     let before = key(path);
@@ -97,7 +122,7 @@ fn kept<T: Clone + Persisted>(
         {
             return Ok(value);
         }
-        if let Some(value) = DISK.get().and_then(|disk| disk.load::<T>(before)) {
+        if let Some(value) = load(before) {
             if let Ok(mut store) = store.lock() {
                 store
                     .get_or_insert_default()
@@ -110,9 +135,7 @@ fn kept<T: Clone + Persisted>(
     if let Some(before) = before
         && key(path).as_ref() == Some(&before)
     {
-        if let Some(disk) = DISK.get() {
-            disk.store(&before, &value);
-        }
+        save(&before, &value);
         if let Ok(mut store) = store.lock() {
             store.get_or_insert_default().insert(before, value.clone());
         }
@@ -128,6 +151,12 @@ pub(crate) fn fingerprint(path: &Path) -> Result<fingerprint::SourceFingerprint>
 /// `artwork::read`, unless this file was read unchanged before.
 pub(crate) fn artwork(path: &Path) -> Result<artwork::SourceArtwork> {
     kept(&ARTWORK, path, artwork::read)
+}
+
+/// `mpeg::read` (MP3, AAC, FLAC, WAV), unless this process read this file
+/// unchanged before.
+pub(crate) fn mpeg(path: &Path) -> Result<mpeg::Source> {
+    remembered(&MPEG, path, |_| None, |_, _| {}, mpeg::read)
 }
 
 /// Keep reads across runs in `directory`. Without `reuse` (full readback),

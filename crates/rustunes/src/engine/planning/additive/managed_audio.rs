@@ -701,7 +701,7 @@ pub(super) fn describe_mpeg(
                                 sent != identity.audio.sha256,
                                 catalog,
                                 || {
-                                    Ok(music_protocol::media::mpeg::read(&desired_path)?
+                                    Ok(super::super::source_reads::mpeg(&desired_path)?
                                         == source.source)
                                 },
                             )
@@ -810,7 +810,7 @@ fn mpeg_batch_association(
                 "audio_sha256":hex(&conversion.source_audio),"ffmpeg":conversion.ffmpeg});
         }
         ensure!(
-            music_protocol::media::mpeg::read(&desired_path)? == source.source,
+            super::super::source_reads::mpeg(&desired_path)? == source.source,
             "desired source changed before replacement proposal publication"
         );
         context.control.check()?;
