@@ -2,4 +2,5 @@
 //! it, available to them through the `offline-test-support` feature.
 pub mod afc;
 pub mod catalogue;
+pub mod mp4;
 pub mod mpeg;

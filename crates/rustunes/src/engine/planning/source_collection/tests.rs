@@ -242,10 +242,8 @@ fn repeated_values_survive_and_audio_duplicate_variants_remain_visible() {
     let result = inspect(&selected).unwrap();
     result.ensure_complete().unwrap();
     assert_eq!(result.tracks.len(), 3);
-    assert_eq!(
-        result.tracks[0].metadata.artist,
-        ["First", "Second", "First"]
-    );
+    // One ©ART atom holding three values names one artist, its first.
+    assert_eq!(result.tracks[0].metadata.artist, ["First"]);
     assert!(result.tracks[0].metadata.album_artist.is_empty());
     assert_eq!(result.duplicates.len(), 1);
     let group = &result.duplicates[0];

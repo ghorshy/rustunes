@@ -155,6 +155,9 @@ pub(super) fn set_artist_separator(separator: Option<&str>) -> Result<()> {
     };
     metadata::check_artist_separator(separator)?;
     let changed = settings.artist_separator() != separator;
+    if changed {
+        refuse_unfinished(&super::default_state_directory()?)?;
+    }
     settings.artist_separator = Some(separator.to_owned());
     write(&file, &settings)?;
     if super::machine::enabled() {
@@ -170,6 +173,21 @@ pub(super) fn set_artist_separator(separator: Option<&str>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Refuse to change the separator while a journal under `state` has
+/// unfinished work: settling it reads the sources again, and joined with
+/// another separator their artists would no longer be the ones sent, so it
+/// would stay unsettled and hold every later sync.
+fn refuse_unfinished(state: &Path) -> Result<()> {
+    let unfinished = crate::engine::state::journal::unfinished_in(state)?;
+    let Some((journal, work)) = unfinished.first() else {
+        return Ok(());
+    };
+    anyhow::bail!(
+        "{work} from an earlier run is unfinished (journal {}); settle it before changing the artist separator: `rustunes status` shows it and how to settle it",
+        journal.display()
+    )
 }
 
 #[cfg(test)]
@@ -233,5 +251,11 @@ mod tests {
         .unwrap();
         assert!(read(&file).is_err());
         fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_state_directory_without_unfinished_work_allows_a_change() {
+        let state = std::env::temp_dir().join(format!("rustunes-no-state-{}", std::process::id()));
+        refuse_unfinished(&state).unwrap();
     }
 }
