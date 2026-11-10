@@ -108,16 +108,22 @@ OpenSSL dependency.
 | | |
 | --- | --- |
 | Tested phone | iPhone 16 Pro Max (`iPhone17,2`), iOS 27.0.1 and 27.2 |
-| | iPhone 13 (`iPhone14,5`), iOS 27.2: planning and dry runs over USB (November 2026) |
+| | iPhone 13 (`iPhone14,5`), iOS 27.2, over USB (November 2026) |
 | Tested computer | Linux x86_64 (Fedora 44; Arch Linux, November 2026) |
 | Tested library | 419 tracks, 8.6 GB, 418 covers, over USB and Wi-Fi |
-| | 1046 files (M4A, MP3, FLAC, WAV), dry runs only, on the iPhone 13 |
+| | iPhone 13: 50 tracks sent and verified (M4A, MP3, FLAC, WAV, with covers), one interrupted batch settled by `resume`; dry runs of 1046 files |
 
 Other models and iOS versions have not been tested, and Apple can change the
 protocol in any iOS update. As a safeguard, rustunes reads the phone's music
 database before sending anything. It refuses a database older than schema
 version 2400060, or one missing a table or column it relies on. A newer version
 that has everything is used, with a warning that it is untested.
+
+On Linux 7.x, the `ipheth` driver (the phone's internet over USB) can stall the
+USB link a few seconds after the phone connects: `usbmuxd` then logs `RX
+transfer stalled` and loses the phone mid-sync. Unload it while syncing with
+`sudo modprobe -r ipheth`, and settle an interrupted batch with `rustunes
+resume`.
 
 ## Installation
 
