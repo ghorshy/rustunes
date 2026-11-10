@@ -11,6 +11,10 @@ use std::{
     io,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{Context as TaskContext, Poll, ready},
     time::Duration,
 };
@@ -160,6 +164,9 @@ impl MetadataOnlyPolicy {
 
 pub struct Session {
     channel: Channel,
+    /// The idle link this session was started on, kept so `into_link` can
+    /// restore its own trace and frame numbering.
+    link: LinkTail,
     phase: Phase,
     signer: grappa::FixedHostSession,
     prepared: Prepared,
@@ -563,74 +570,90 @@ impl Channel {
     }
 }
 
-impl Session {
-    /// Ordinary metadata session whose outgoing, incoming and interrupted
-    /// evidence shares the caller's aggregate output allowance. This is not a
-    /// whole-step storage reservation and grants no execution authority.
-    pub async fn connect_with_output(
-        provider: &dyn IdeviceProvider,
-        prepared: Prepared,
-        trace: &Path,
-        control: &super::transfer::CaptureControl,
-        output: OutputAllowance,
-    ) -> Result<Self> {
-        control.check()?;
-        let deadline = control.deadline;
-        let handshake_deadline = deadline.min(Instant::now() + Duration::from_secs(30));
-        let client = control
-            .run(
-                Duration::from_secs(30),
-                "bounded-output ATC connect",
-                async { Ok(SessionTransport::connect(provider).await?.0) },
-            )
-            .await?
-            .with_output(output, control)?;
-        Self::begin(client, prepared, trace, deadline, handshake_deadline).await
-    }
+/// An open ATC link. The handshake runs once here; each `begin_sync` starts
+/// one bounded session, and a finished session returns the idle link with
+/// `Session::into_link`. Any error closes the link instead of returning it.
+pub struct Link {
+    channel: Channel,
+    budget: Arc<AtomicUsize>,
+    /// Bytes allowed per session on this link, reloaded at each begin.
+    session_limit: usize,
+}
 
+/// The idle link fields a session holds while it owns the transport.
+struct LinkTail {
+    trace: PathBuf,
+    frames: usize,
+    budget: Arc<AtomicUsize>,
+    session_limit: usize,
+    /// The session writes into the link's own trace directory, so frame
+    /// numbering continues instead of restarting at zero.
+    shared_trace: bool,
+}
+
+/// Why starting a session on a link failed, and whether its request was sent.
+enum BeginFailure {
+    /// The request's send failed: nothing reached the phone on this link, so
+    /// the same preparation may go out on a new one.
+    Unsent(anyhow::Error, Prepared),
+    /// The link or the phone failed after the request.
+    Lost(anyhow::Error),
+}
+
+impl Link {
+    /// Connect and complete the handshake up to `SyncAllowed`, without
+    /// requesting a sync. The phone's own refresh policy is untouched.
     pub async fn connect(
         provider: &dyn IdeviceProvider,
-        prepared: Prepared,
         trace: &Path,
         deadline: Instant,
     ) -> Result<Self> {
         let handshake_deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+        Self::connect_until(provider, trace, handshake_deadline).await
+    }
+
+    async fn connect_until(
+        provider: &dyn IdeviceProvider,
+        trace: &Path,
+        handshake_deadline: Instant,
+    ) -> Result<Self> {
         ensure!(
             Instant::now() < handshake_deadline,
             "ATC deadline expired before connect"
         );
-        let client = timeout_at(handshake_deadline, SessionTransport::connect(provider))
+        let transport = timeout_at(handshake_deadline, SessionTransport::connect(provider))
             .await
-            .context("ATC connection deadline")??
-            .0;
-        Self::begin(client, prepared, trace, deadline, handshake_deadline).await
+            .context("ATC connection deadline")??;
+        let mut link = Self {
+            channel: Channel {
+                client: transport.atc,
+                trace: trace.to_owned(),
+                deadline: handshake_deadline,
+                frames: 0,
+                last_received_sha256: [0; 32],
+            },
+            budget: transport.remaining,
+            session_limit: MAX_BYTES,
+        };
+        link.handshake(handshake_deadline).await?;
+        Ok(link)
     }
 
-    async fn begin(
-        client: atc::Atc,
-        prepared: Prepared,
-        trace: &Path,
-        deadline: Instant,
-        handshake_deadline: Instant,
-    ) -> Result<Self> {
-        let mut channel = Channel {
-            client,
-            trace: trace.to_owned(),
-            deadline: handshake_deadline,
-            frames: 0,
-            last_received_sha256: [0; 32],
-        };
+    /// The Ping/Capabilities/SyncAllowed exchange. Kept in the link's own
+    /// trace directory; session frames start at zero in theirs.
+    async fn handshake(&mut self, deadline: Instant) -> Result<()> {
+        self.channel.deadline = deadline;
         let mut ping = Dictionary::new();
         ping.insert("Session".into(), 1u64.into());
         ping.insert("Command".into(), "Ping".into());
-        channel.send(&Value::Dictionary(ping)).await?;
-        let (mut pong, mut capable, mut allowed, mut requested) = (false, false, false, false);
-        while channel.frames < 64 {
-            let value = channel.receive().await?;
+        self.channel.send(&Value::Dictionary(ping)).await?;
+        let (mut pong, mut capable, mut allowed) = (false, false, false);
+        while self.channel.frames < 64 {
+            let value = self.channel.receive().await?;
             let root = dictionary(&value)?;
             match string(root, "Command")? {
                 "Pong" => {
-                    ensure!(!pong && !requested, "duplicate/late Pong");
+                    ensure!(!pong, "duplicate Pong");
                     pong = true;
                 }
                 "Capabilities" => {
@@ -653,11 +676,133 @@ impl Session {
                 "InstalledAssets" | "AssetMetrics" => {
                     child(root, "Params")?;
                 }
+                _ => bail!("unexpected handshake command; no further sends"),
+            }
+            if pong && capable && allowed {
+                return Ok(());
+            }
+        }
+        bail!("handshake frame limit reached")
+    }
+
+    /// Start one session on this link. The link is consumed; a session that
+    /// reaches `Phase::Finished` gives it back with `into_link`.
+    pub async fn begin_sync(
+        self,
+        prepared: Prepared,
+        trace: &Path,
+        deadline: Instant,
+    ) -> Result<Session> {
+        let request_deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+        match self
+            .begin_sync_until(prepared, trace, deadline, request_deadline)
+            .await
+        {
+            Ok(session) => Ok(session),
+            Err(BeginFailure::Unsent(error, _) | BeginFailure::Lost(error)) => Err(error),
+        }
+    }
+
+    /// As `begin_sync`, but a request whose send failed comes back with its
+    /// error and preparation: nothing reached the phone on this link, so the
+    /// caller may reopen and send the same preparation again. Every failure
+    /// after the request keeps its meaning and is returned with `None`.
+    pub async fn begin_sync_or_unsent(
+        self,
+        prepared: Prepared,
+        trace: &Path,
+        deadline: Instant,
+    ) -> std::result::Result<Session, (anyhow::Error, Option<Prepared>)> {
+        let request_deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+        match self
+            .begin_sync_until(prepared, trace, deadline, request_deadline)
+            .await
+        {
+            Ok(session) => Ok(session),
+            Err(BeginFailure::Unsent(error, prepared)) => Err((error, Some(prepared))),
+            Err(BeginFailure::Lost(error)) => Err((error, None)),
+        }
+    }
+
+    /// Wait on this idle link for the phone to stall or close it, at most
+    /// `window`, answering any Ping. Returns true when the link is gone and
+    /// false when the window passed.
+    ///
+    /// Messages the phone pushes while it refreshes are read and dropped
+    /// rather than ending the wait: it finishes the refresh with an updated
+    /// AssetMetrics, and the port stall follows that notice 1–2 s later (E8
+    /// 21:22:10 notice, 21:22:12 stall), so returning on the notice would
+    /// hand the next session a link the stall is about to take. A receive cut
+    /// short cannot be resumed, so the caller drops the link either way, as
+    /// it must after the phone stalls the port.
+    pub async fn wait_lost(&mut self, window: Duration) -> bool {
+        let deadline = Instant::now() + window;
+        loop {
+            // The channel's own read bound stays just behind this wait, so
+            // the wait ends on its window rather than on a read deadline.
+            self.channel.deadline = deadline + Duration::from_secs(1);
+            match timeout_at(deadline, self.channel.receive()).await {
+                Err(_) => return false,
+                Ok(Err(_)) => return true,
+                Ok(Ok(_)) => {}
+            }
+        }
+    }
+
+    async fn begin_sync_until(
+        mut self,
+        prepared: Prepared,
+        trace: &Path,
+        deadline: Instant,
+        request_deadline: Instant,
+    ) -> std::result::Result<Session, BeginFailure> {
+        // Frame and byte limits are per session, even though the transport
+        // outlives them.
+        self.budget.store(self.session_limit, Ordering::Relaxed);
+        let shared_trace = self.channel.trace == trace;
+        let link = LinkTail {
+            trace: if shared_trace {
+                self.channel.trace.clone()
+            } else {
+                std::mem::replace(&mut self.channel.trace, trace.to_owned())
+            },
+            frames: if shared_trace {
+                self.channel.frames
+            } else {
+                std::mem::replace(&mut self.channel.frames, 0)
+            },
+            budget: Arc::clone(&self.budget),
+            session_limit: self.session_limit,
+            shared_trace,
+        };
+        self.channel.deadline = request_deadline;
+        self.channel.last_received_sha256 = [0; 32];
+
+        if let Err(error) = self.channel.send(&prepared.request).await {
+            return Err(BeginFailure::Unsent(error, prepared));
+        }
+        self.begin_after_request(prepared, link, deadline)
+            .await
+            .map_err(BeginFailure::Lost)
+    }
+
+    /// The ReadyForSync wait, after the request is on the wire.
+    async fn begin_after_request(
+        mut self,
+        prepared: Prepared,
+        link: LinkTail,
+        deadline: Instant,
+    ) -> Result<Session> {
+        while self.channel.frames < 64 {
+            let value = self.channel.receive().await?;
+            let root = dictionary(&value)?;
+            match string(root, "Command")? {
+                "SyncAllowed" => check_allowed(child(root, "Params")?)?,
+                "InstalledAssets" | "AssetMetrics" => {
+                    child(root, "Params")?;
+                }
                 "ReadyForSync" => {
-                    ensure!(
-                        requested && number(root, "Session")? == 2,
-                        "unmatched Ready session"
-                    );
+                    ensure!(number(root, "Session")? == 2, "unmatched Ready session");
                     let params = child(root, "Params")?;
                     exact_keys(params, &["DataclassAnchors", "DeviceInfo"])?;
                     let anchors = child(params, "DataclassAnchors")?;
@@ -675,10 +820,11 @@ impl Session {
                         .context("missing Ready Grappa")?;
                     let signer =
                         grappa::FixedHostSession::from_reply(&grappa::HOST_REQUEST, reply)?;
-                    channel.deadline = deadline;
-                    let ready_receipt_sha256 = channel.last_received_sha256;
-                    return Ok(Self {
-                        channel,
+                    self.channel.deadline = deadline;
+                    let ready_receipt_sha256 = self.channel.last_received_sha256;
+                    return Ok(Session {
+                        channel: self.channel,
+                        link,
                         phase: Phase::Ready,
                         signer,
                         prepared,
@@ -689,12 +835,158 @@ impl Session {
                 }
                 _ => bail!("unexpected handshake command; no further sends"),
             }
-            if !requested && pong && capable && allowed {
-                channel.send(&prepared.request).await?;
-                requested = true;
-            }
         }
         bail!("handshake frame limit reached")
+    }
+
+    /// Offline tests: wrap an already-connected transport as an idle link.
+    #[cfg(test)]
+    pub(crate) fn from_atc(client: atc::Atc, trace: &Path, deadline: Instant) -> Self {
+        Self {
+            channel: Channel {
+                client,
+                trace: trace.to_owned(),
+                deadline,
+                frames: 0,
+                last_received_sha256: [0; 32],
+            },
+            budget: Arc::new(AtomicUsize::new(MAX_BYTES)),
+            session_limit: MAX_BYTES,
+        }
+    }
+}
+
+impl Session {
+    /// Ordinary metadata session whose outgoing, incoming and interrupted
+    /// evidence shares the caller's aggregate output allowance. This is not a
+    /// whole-step storage reservation and grants no execution authority.
+    pub async fn connect_with_output(
+        provider: &dyn IdeviceProvider,
+        prepared: Prepared,
+        trace: &Path,
+        control: &super::transfer::CaptureControl,
+        output: OutputAllowance,
+    ) -> Result<Self> {
+        control.check()?;
+        let deadline = control.deadline;
+        let handshake_deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+        let transport = control
+            .run(
+                Duration::from_secs(30),
+                "bounded-output ATC connect",
+                async { Ok(SessionTransport::connect(provider).await?) },
+            )
+            .await?;
+        let mut link = Link {
+            channel: Channel {
+                client: transport.atc.with_output(output, control)?,
+                trace: trace.to_owned(),
+                deadline: handshake_deadline,
+                frames: 0,
+                last_received_sha256: [0; 32],
+            },
+            budget: transport.remaining,
+            session_limit: MAX_BYTES,
+        };
+        link.handshake(handshake_deadline).await?;
+        match link
+            .begin_sync_until(prepared, trace, deadline, handshake_deadline)
+            .await
+        {
+            Ok(session) => Ok(session),
+            Err(BeginFailure::Unsent(error, _) | BeginFailure::Lost(error)) => Err(error),
+        }
+    }
+
+    pub async fn connect(
+        provider: &dyn IdeviceProvider,
+        prepared: Prepared,
+        trace: &Path,
+        deadline: Instant,
+    ) -> Result<Self> {
+        let handshake_deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+        let link = Link::connect_until(provider, trace, handshake_deadline).await?;
+        match link
+            .begin_sync_until(prepared, trace, deadline, handshake_deadline)
+            .await
+        {
+            Ok(session) => Ok(session),
+            Err(BeginFailure::Unsent(error, _) | BeginFailure::Lost(error)) => Err(error),
+        }
+    }
+
+    /// Offline test seam: run the link handshake and one session over an
+    /// already-connected ATC transport, as `connect` does over a provider.
+    #[cfg(test)]
+    pub(crate) async fn begin(
+        client: atc::Atc,
+        prepared: Prepared,
+        trace: &Path,
+        deadline: Instant,
+        handshake_deadline: Instant,
+    ) -> Result<Self> {
+        let mut link = Link {
+            channel: Channel {
+                client,
+                trace: trace.to_owned(),
+                deadline: handshake_deadline,
+                frames: 0,
+                last_received_sha256: [0; 32],
+            },
+            budget: Arc::new(AtomicUsize::new(MAX_BYTES)),
+            session_limit: MAX_BYTES,
+        };
+        link.handshake(handshake_deadline).await?;
+        match link
+            .begin_sync_until(prepared, trace, deadline, handshake_deadline)
+            .await
+        {
+            Ok(session) => Ok(session),
+            Err(BeginFailure::Unsent(error, _) | BeginFailure::Lost(error)) => Err(error),
+        }
+    }
+
+    /// Take back the idle link after `Phase::Finished`, consuming the
+    /// `SyncAllowed` the phone sends after `SyncFinished` and answering any
+    /// Ping. Anything else, or no SyncAllowed within the bound, closes it.
+    pub async fn into_link(mut self) -> Result<Link> {
+        ensure!(
+            self.phase == Phase::Finished,
+            "only a finished session can return its link"
+        );
+        if !self.link.shared_trace {
+            self.channel.trace = std::mem::replace(&mut self.link.trace, PathBuf::new());
+            self.channel.frames = std::mem::replace(&mut self.link.frames, 0);
+        }
+        self.channel.last_received_sha256 = [0; 32];
+        self.channel.deadline = self
+            .channel
+            .deadline
+            .min(Instant::now() + Duration::from_secs(10));
+        let limit = self.channel.frames + 64;
+        while self.channel.frames < limit {
+            let value = self.channel.receive().await?;
+            let root = dictionary(&value)?;
+            ensure!(
+                number(root, "Session")? == 2,
+                "wrong-session link handoff message"
+            );
+            match string(root, "Command")? {
+                "SyncAllowed" => {
+                    check_allowed(child(root, "Params")?)?;
+                    return Ok(Link {
+                        channel: self.channel,
+                        budget: self.link.budget,
+                        session_limit: self.link.session_limit,
+                    });
+                }
+                "InstalledAssets" | "AssetMetrics" => {
+                    child(root, "Params")?;
+                }
+                _ => bail!("unexpected message when returning the link"),
+            }
+        }
+        bail!("link handoff frame limit reached")
     }
 
     pub fn sign_metadata(&self, exact_bytes: &[u8]) -> Result<[u8; 21]> {
@@ -1456,26 +1748,31 @@ fn check_allowed(params: &Dictionary) -> Result<()> {
         .or_else(|_| strings(disabled, &["Movie", "TVEpisode", "HomeVideo"]))
 }
 
-struct SessionTransport(atc::Atc);
+struct SessionTransport {
+    atc: atc::Atc,
+    remaining: Arc<AtomicUsize>,
+}
 
 impl IdeviceService for SessionTransport {
     fn service_name() -> Cow<'static, str> {
         atc::Atc::service_name()
     }
     async fn from_stream(device: Idevice) -> std::result::Result<Self, IdeviceError> {
-        Ok(Self(budgeted(device, MAX_BYTES).await?))
+        let remaining = Arc::new(AtomicUsize::new(MAX_BYTES));
+        let atc = budgeted(device, remaining.clone()).await?;
+        Ok(Self { atc, remaining })
     }
 }
 
-async fn budgeted(device: Idevice, limit: usize) -> std::result::Result<atc::Atc, IdeviceError> {
+async fn budgeted(
+    device: Idevice,
+    remaining: Arc<AtomicUsize>,
+) -> std::result::Result<atc::Atc, IdeviceError> {
     let inner = device
         .get_socket()
         .ok_or(IdeviceError::NoEstablishedConnection)?;
     atc::Atc::from_stream(Idevice::new(
-        Box::new(ByteBudget {
-            inner,
-            remaining: limit,
-        }),
+        Box::new(ByteBudget { inner, remaining }),
         "bounded-media",
     ))
     .await
@@ -1484,10 +1781,11 @@ async fn budgeted(device: Idevice, limit: usize) -> std::result::Result<atc::Atc
 /// Transport byte counter only: the existing Atc owns all framing. Both
 /// directions share one cap, so an oversized aggregate is stopped mid-frame
 /// and preserved by Atc's normal partial-frame path, without unsafe code.
+/// The cap is reloaded per session through the shared counter.
 #[derive(Debug)]
 struct ByteBudget {
     inner: Box<dyn ReadWrite>,
-    remaining: usize,
+    remaining: Arc<AtomicUsize>,
 }
 
 impl AsyncRead for ByteBudget {
@@ -1500,14 +1798,16 @@ impl AsyncRead for ByteBudget {
         if output.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        if this.remaining == 0 {
+        let remaining = this.remaining.load(Ordering::Relaxed);
+        if remaining == 0 {
             return Poll::Ready(Err(io::Error::other("ATC aggregate byte limit reached")));
         }
         let mut scratch = [0u8; 8192];
-        let length = this.remaining.min(output.remaining()).min(scratch.len());
+        let length = remaining.min(output.remaining()).min(scratch.len());
         let mut bounded = ReadBuf::new(&mut scratch[..length]);
         ready!(Pin::new(&mut this.inner).poll_read(cx, &mut bounded))?;
-        this.remaining -= bounded.filled().len();
+        this.remaining
+            .fetch_sub(bounded.filled().len(), Ordering::Relaxed);
         output.put_slice(bounded.filled());
         Poll::Ready(Ok(()))
     }
@@ -1522,13 +1822,13 @@ impl AsyncWrite for ByteBudget {
         if bytes.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        if this.remaining == 0 {
+        let remaining = this.remaining.load(Ordering::Relaxed);
+        if remaining == 0 {
             return Poll::Ready(Err(io::Error::other("ATC aggregate byte limit reached")));
         }
-        let count = ready!(
-            Pin::new(&mut this.inner).poll_write(cx, &bytes[..bytes.len().min(this.remaining)])
-        )?;
-        this.remaining -= count;
+        let count =
+            ready!(Pin::new(&mut this.inner).poll_write(cx, &bytes[..bytes.len().min(remaining)]))?;
+        this.remaining.fetch_sub(count, Ordering::Relaxed);
         Poll::Ready(Ok(count))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
@@ -1750,9 +2050,12 @@ mod tests {
     async fn transport(limit: usize) -> (atc::Atc, DuplexStream) {
         let (client, peer) = tokio::io::duplex(64 * 1024);
         (
-            budgeted(Idevice::new(Box::new(client), "offline-only"), limit)
-                .await
-                .unwrap(),
+            budgeted(
+                Idevice::new(Box::new(client), "offline-only"),
+                Arc::new(AtomicUsize::new(limit)),
+            )
+            .await
+            .unwrap(),
             peer,
         )
     }
@@ -2351,6 +2654,7 @@ mod tests {
     mod dynamic;
     mod empty_delta;
     mod empty_delta_observe;
+    mod link;
     mod pending_audio;
     mod pending_completion;
     mod stage;

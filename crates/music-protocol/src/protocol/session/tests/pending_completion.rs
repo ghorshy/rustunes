@@ -286,7 +286,7 @@ async fn metered() -> (
             }),
             "offline-only",
         ),
-        MAX_BYTES,
+        Arc::new(AtomicUsize::new(MAX_BYTES)),
     )
     .await
     .unwrap();
@@ -769,7 +769,7 @@ async fn pending_completion_ready_callback_chunk_and_flush_injection_stop_next_a
                         }),
                         "offline-only",
                     ),
-                    MAX_BYTES,
+                    Arc::new(AtomicUsize::new(MAX_BYTES)),
                 )
                 .await
                 .unwrap();
