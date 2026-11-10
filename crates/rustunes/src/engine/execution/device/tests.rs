@@ -263,3 +263,19 @@ async fn a_usbmuxd_socket_nothing_serves_says_how_to_start_it() {
     }
     std::fs::remove_dir_all(&directory).unwrap();
 }
+
+#[test]
+fn only_a_connect_the_daemon_could_not_serve_yet_is_retried() {
+    use idevice::usbmuxd::errors::UsbmuxdError;
+    // netmuxd answers every Connect it cannot serve while it reopens the
+    // device with usbmuxd's generic bad command (Number 1).
+    assert!(reopening(&IdeviceError::Usbmuxd(UsbmuxdError::BadCommand)));
+    for error in [
+        UsbmuxdError::BadDevice,
+        UsbmuxdError::ConnectionRefused,
+        UsbmuxdError::BadVersion,
+    ] {
+        assert!(!reopening(&IdeviceError::Usbmuxd(error)));
+    }
+    assert!(!reopening(&IdeviceError::UnexpectedResponse("x".into())));
+}
