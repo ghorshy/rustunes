@@ -20,6 +20,7 @@ pub enum Format {
     Tiff,
 }
 impl Format {
+    pub(crate) const ALL: [Self; 3] = [Self::Gif, Self::Bmp, Self::Tiff];
     /// The format whose signature `bytes` starts with.
     pub fn of(bytes: &[u8]) -> Option<Self> {
         if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {

@@ -6,7 +6,7 @@
 //!
 //! [`audio_source`]: crate::media::audio_source
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -16,6 +16,17 @@ use std::{
     path::Path,
 };
 
+pub(crate) mod stored;
+
+/// A name from a fixed set. Spelled as an alias so serde does not take a
+/// stored one as borrowed from its input ([`stored`]).
+pub(crate) type Name = &'static str;
+
+/// [`EncodedMpeg::format`] of an MPEG-1 Layer III source.
+pub(crate) const ENCODED_MPEG1_LAYER3: Name = "encoded-mpeg1-layer3";
+/// [`EncodedMpeg::format`] of every other format's source.
+pub(crate) const ENCODED_AUDIO: Name = "encoded-audio";
+
 pub mod gapless;
 pub mod projection;
 pub mod timing;
@@ -24,15 +35,16 @@ const MAX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TAG: usize = 16 * 1024 * 1024;
 const MAX_TEXT: usize = 64 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fingerprint {
     pub file_bytes: u64,
     pub full_file_sha256: String,
     pub audio: EncodedMpeg,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncodedMpeg {
-    pub format: &'static str,
+    #[serde(deserialize_with = "stored::audio_format")]
+    pub format: Name,
     pub sha256: String,
     pub frame_bytes_sha256: String,
     pub sample_rate: u32,
@@ -41,7 +53,7 @@ pub struct EncodedMpeg {
     pub audio_bytes: u64,
     pub coded_samples: u64,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tags {
     pub title: Vec<String>,
     pub artist: Vec<String>,
@@ -58,22 +70,22 @@ pub struct Tags {
     pub compilation: Option<bool>,
     /// COMM frames that say something. A frame with an empty description and
     /// empty text is left out: it has nothing a catalogue could hold.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<Comment>,
     /// Explicit sort names: ID3 TSOT, TSOP, TSOA, TSO2 and TSOC, MP4 sonm,
     /// soar, soal, soaa and soco, and the Vorbis `*SORT` comments.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sort_title: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sort_artist: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sort_album: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sort_album_artist: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sort_composer: Vec<String>,
     /// What Apple's sync reads from an ID3v2 tag for an MP3's gapless fields.
-    #[serde(skip_serializing_if = "gapless::EncoderHints::is_empty")]
+    #[serde(default, skip_serializing_if = "gapless::EncoderHints::is_empty")]
     pub encoder_hints: gapless::EncoderHints,
 }
 impl Tags {
@@ -94,22 +106,23 @@ impl Tags {
         texts
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
     pub language: String,
     pub description: String,
     pub text: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameEvidence {
     pub id: String,
     pub bytes: usize,
     pub sha256: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Picture {
     /// What the bytes are, whatever the container declared.
-    pub mime: &'static str,
+    #[serde(deserialize_with = "stored::mime")]
+    pub mime: Name,
     /// The container declared an image type (see [`image_facts`]), as FFmpeg
     /// needs to read a FLAC's picture; not in the JSON.
     #[serde(skip)]
@@ -124,10 +137,13 @@ pub struct Picture {
     pub structure_verified: bool,
     pub image_decode_verified: bool,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// Deserialized only through [`Source::from_stored`], which restores the
+/// fields the JSON leaves out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     /// The format's name (`mpeg1-layer3`, `aac-lc`, `flac`, ...).
-    pub codec: &'static str,
+    #[serde(deserialize_with = "stored::codec")]
+    pub codec: Name,
     pub fingerprint: Fingerprint,
     /// MPEG-1 Layer III frame timing; `None` for every other format.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,7 +192,7 @@ impl Source {
             ensure!(
                 self.codec == stream.format.name()
                     && self.timing.is_none()
-                    && self.fingerprint.audio.format == "encoded-audio",
+                    && self.fingerprint.audio.format == ENCODED_AUDIO,
                 "audio inspection identity differs"
             );
             let value = crate::media::fingerprint::TransferredSource::encoded(
@@ -192,7 +208,7 @@ impl Source {
         }
         ensure!(
             self.codec == "mpeg1-layer3"
-                && self.fingerprint.audio.format == "encoded-mpeg1-layer3"
+                && self.fingerprint.audio.format == ENCODED_MPEG1_LAYER3
                 && self.fingerprint.audio.coded_samples
                     == u64::from(self.fingerprint.audio.frame_count) * 1152,
             "MP3 inspection identity differs"
@@ -310,7 +326,7 @@ fn read_file(file: &mut File, size: u64) -> Result<Source> {
             file_bytes: size,
             full_file_sha256: hex(&full),
             audio: EncodedMpeg {
-                format: "encoded-mpeg1-layer3",
+                format: ENCODED_MPEG1_LAYER3,
                 sha256: hex(&encoded.finalize()),
                 frame_bytes_sha256: hex(&frame_hash),
                 sample_rate,

@@ -3,8 +3,8 @@
 //! revalidation and a dry run's live preflight read the same files seconds
 //! apart, and the next run reads them again; each read hashes the whole file.
 //! A file whose path, device, inode, size, mtime or ctime changed is read
-//! again, and a read during which any of them changed is not kept. Reads of
-//! every other format ([`mpeg`]) are kept for this process only. Uploads,
+//! again, and a read during which any of them changed is not kept. Every
+//! other format's read ([`mpeg`]) is kept the same way. Uploads,
 //! pre-send checks and recovery read the bytes themselves.
 //!
 //! Across runs, reads live in `sources.sqlite`, never in a journal, and the
@@ -94,14 +94,40 @@ fn kept<T: Clone + Persisted>(
     remembered(
         store,
         path,
-        |key| DISK.get().and_then(|disk| disk.load::<T>(key)),
+        |key| disk().and_then(|disk| disk.load::<T>(key)),
         |key, value| {
-            if let Some(disk) = DISK.get() {
+            if let Some(disk) = disk() {
                 disk.store(key, value);
             }
         },
         read,
     )
+}
+
+/// The cross-run cache, once [`persist`] named it.
+fn disk() -> Option<&'static Disk> {
+    #[cfg(test)]
+    if let Some(disk) = TEST_DISK.get() {
+        return Some(disk);
+    }
+    DISK.get()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own cache, seen only on its thread.
+    static TEST_DISK: std::cell::Cell<Option<&'static Disk>> = const { std::cell::Cell::new(None) };
+}
+
+/// Use a cache in `directory` on this thread, as a later run would, and
+/// forget the other formats' reads this process made under `under`. Each
+/// call leaks its `Disk`, which a test can afford.
+#[cfg(test)]
+pub(crate) fn as_a_new_run(directory: PathBuf, under: &Path) {
+    TEST_DISK.set(Some(Box::leak(Box::new(Disk::new(directory, true)))));
+    if let Some(store) = MPEG.lock().unwrap().as_mut() {
+        store.retain(|key, _| !key.path.starts_with(under));
+    }
 }
 
 /// `read` of `path`, unless `store` or `load` has it for the file's current
@@ -153,10 +179,10 @@ pub(crate) fn artwork(path: &Path) -> Result<artwork::SourceArtwork> {
     kept(&ARTWORK, path, artwork::read)
 }
 
-/// `mpeg::read` (MP3, AAC, FLAC, WAV), unless this process read this file
-/// unchanged before.
+/// `mpeg::read` (MP3, AAC, FLAC, WAV), unless this file was read unchanged
+/// before.
 pub(crate) fn mpeg(path: &Path) -> Result<mpeg::Source> {
-    remembered(&MPEG, path, |_| None, |_, _| {}, mpeg::read)
+    kept(&MPEG, path, mpeg::read)
 }
 
 /// Keep reads across runs in `directory`. Without `reuse` (full readback),
@@ -256,6 +282,10 @@ const SCHEMA: cache_database::Schema = cache_database::Schema {
             "CREATE TABLE covers(sha256 BLOB PRIMARY KEY CHECK(length(sha256)=32), bytes BLOB NOT NULL CHECK(length(bytes)>0)) STRICT, WITHOUT ROWID",
         ),
         (
+            "mpeg",
+            "CREATE TABLE mpeg(path BLOB PRIMARY KEY CHECK(length(path) BETWEEN 1 AND 4096), stat BLOB NOT NULL CHECK(length(stat)=56), source BLOB NOT NULL CHECK(length(source)>0), stored INTEGER NOT NULL) STRICT, WITHOUT ROWID",
+        ),
+        (
             "fingerprints",
             "CREATE TABLE fingerprints(path BLOB PRIMARY KEY CHECK(length(path) BETWEEN 1 AND 4096), stat BLOB NOT NULL CHECK(length(stat)=56), full_file_sha256 BLOB NOT NULL CHECK(length(full_file_sha256)=32), audio_sha256 BLOB NOT NULL CHECK(length(audio_sha256)=32), alac_config_sha256 BLOB NOT NULL CHECK(length(alac_config_sha256)=32), sample_sizes_sha256 BLOB NOT NULL CHECK(length(sample_sizes_sha256)=32), media_sha256 BLOB NOT NULL CHECK(length(media_sha256)=32), timescale INTEGER NOT NULL, duration_ticks INTEGER NOT NULL, media_bytes INTEGER NOT NULL, stored INTEGER NOT NULL) STRICT, WITHOUT ROWID",
         ),
@@ -329,6 +359,7 @@ fn open(directory: &Path) -> Result<Connection> {
     let cutoff = unix_now() - KEEP_DAYS * 86_400;
     c.execute("DELETE FROM fingerprints WHERE stored<?1", [cutoff])?;
     c.execute("DELETE FROM artwork WHERE stored<?1", [cutoff])?;
+    c.execute("DELETE FROM mpeg WHERE stored<?1", [cutoff])?;
     c.execute(
         "DELETE FROM covers WHERE sha256 NOT IN (SELECT cover_sha256 FROM artwork WHERE cover_sha256 IS NOT NULL)",
         [],
@@ -418,6 +449,36 @@ impl Persisted for fingerprint::SourceFingerprint {
                 i64::try_from(a.media_bytes)?,
                 unix_now(),
             ],
+        )?;
+        Ok(())
+    }
+}
+
+impl Persisted for mpeg::Source {
+    /// A row this build cannot read back exactly as it was written is a miss.
+    fn load(c: &Connection, key: &Key) -> Result<Option<Self>> {
+        let Some(stored) = c
+            .query_row(
+                "SELECT source FROM mpeg WHERE path=?1 AND stat=?2",
+                params![key.path(), key.stat()],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        Ok(mpeg::Source::from_stored(&stored)
+            .ok()
+            .filter(|source| source.fingerprint.file_bytes == key.size))
+    }
+    fn store(&self, c: &Connection, key: &Key) -> Result<()> {
+        ensure!(
+            self.fingerprint.file_bytes == key.size,
+            "source size differs from its file"
+        );
+        c.execute(
+            "INSERT OR REPLACE INTO mpeg VALUES (?1,?2,?3,?4)",
+            params![key.path(), key.stat(), self.to_stored()?, unix_now()],
         )?;
         Ok(())
     }

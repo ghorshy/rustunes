@@ -29,7 +29,7 @@ enum Codec {
 /// which have their own identities. The digest covers the
 /// codec configuration and the coded payload, never tags, pictures, padding or
 /// where the payload sits, so retagging a file keeps it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EncodedAudio {
     pub format: Format,
     pub sample_rate: u32,

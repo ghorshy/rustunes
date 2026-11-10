@@ -3279,26 +3279,31 @@ fn a_journal_that_appeared_after_planning_is_planned_with_again() {
     assert_eq!(read_again, 1);
 }
 
-/// The fixture's MP3, FLAC and WAV in `library/`, with their paths.
+/// The fixture's MP3, AAC, FLAC and WAV in `library/`, with their paths.
 fn other_formats(f: &DisclosureFixture) -> Vec<std::path::PathBuf> {
     let library = f.temp.0.join("library");
     fs::create_dir(&library).unwrap();
-    ["tone-mp3-vbr.mp3", "tone-flac.flac", "tone-wav.wav"]
-        .iter()
-        .map(|name| {
-            let path = library.join(name);
-            fs::copy(
-                format!("{}/../../tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR")),
-                &path,
-            )
-            .unwrap();
-            path
-        })
-        .collect()
+    [
+        "tone-mp3-vbr.mp3",
+        "tone-aac.m4a",
+        "tone-flac.flac",
+        "tone-wav.wav",
+    ]
+    .iter()
+    .map(|name| {
+        let path = library.join(name);
+        fs::copy(
+            format!("{}/../../tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR")),
+            &path,
+        )
+        .unwrap();
+        path
+    })
+    .collect()
 }
 
 #[test]
-fn planning_reads_each_mp3_flac_and_wav_once() {
+fn planning_reads_each_mp3_aac_flac_and_wav_once() {
     let f = DisclosureFixture::new(0, 0, true);
     let paths = other_formats(&f);
     let (engine, _) = counting();
@@ -3342,4 +3347,40 @@ fn an_mp3_changed_after_selection_is_still_refused() {
         format!("{error:#}").contains("changed after selection"),
         "{error:#}"
     );
+}
+
+#[test]
+fn a_second_run_reads_no_unchanged_mp3_aac_flac_or_wav() {
+    let f = DisclosureFixture::new(0, 0, true);
+    let paths = other_formats(&f);
+    let (engine, _) = counting();
+    let plan = || {
+        engine
+            .plan(crate::engine::PlanRequest {
+                source: &f.temp.0.join("library"),
+                snapshot: &f.temp.0.join("snapshot"),
+                journal: None,
+                output: None,
+                selection: &SelectionOptions::default(),
+                add_only: false,
+                flac_to_alac: false,
+                hand_on: false,
+            })
+            .unwrap()
+    };
+    let cache = f.temp.0.join("cache");
+    let library = f.temp.0.join("library");
+    crate::engine::planning::source_reads::as_a_new_run(cache.clone(), &library);
+    let first = serde_json::to_value(&plan().plan).unwrap();
+    crate::engine::planning::source_reads::as_a_new_run(cache, &library);
+    let second = serde_json::to_value(&plan().plan).unwrap();
+    assert_eq!(second, first);
+    for path in &paths {
+        assert_eq!(
+            music_protocol::test_support::mpeg::reads(path),
+            1,
+            "{}: read only by the first run",
+            path.display()
+        );
+    }
 }

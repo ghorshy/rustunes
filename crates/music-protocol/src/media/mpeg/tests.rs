@@ -584,3 +584,101 @@ fn a_v24_data_length_indicator_is_read_past_and_must_match() {
         "invalid ID3 frame extent"
     );
 }
+
+#[test]
+fn every_formats_source_comes_back_exactly_from_its_stored_form() {
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/");
+    for name in [
+        "tone-mp3-vbr.mp3",
+        "tone-mpeg2.mp3",
+        "tone-aac.m4a",
+        "silence-aac.m4a",
+        "tone-flac.flac",
+        "tone-wav.wav",
+        "tone-aiff.aif",
+    ] {
+        let source = read(&std::path::Path::new(fixtures).join(name)).unwrap();
+        let stored = source.to_stored().unwrap();
+        assert_eq!(Source::from_stored(&stored).unwrap(), source, "{name}");
+    }
+}
+
+#[test]
+fn a_stored_form_of_another_version_or_damaged_is_refused() {
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/");
+    let source = read(&std::path::Path::new(fixtures).join("tone-flac.flac")).unwrap();
+    let stored = source.to_stored().unwrap();
+    let mut other: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    other["version"] = serde_json::json!(0);
+    assert!(Source::from_stored(&serde_json::to_vec(&other).unwrap()).is_err());
+    // Read by another build's media readers: read again.
+    let mut readers: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    readers["readers"] = serde_json::json!("0000000000000000");
+    assert!(Source::from_stored(&serde_json::to_vec(&readers).unwrap()).is_err());
+    // A picture's flag missing.
+    let mut flags: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    flags["declared_types"] = serde_json::json!([true]);
+    assert!(Source::from_stored(&serde_json::to_vec(&flags).unwrap()).is_err());
+    assert!(Source::from_stored(&stored[..stored.len() - 1]).is_err());
+    // A name this build never writes.
+    let mut other_name: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    other_name["source"]["codec"] = serde_json::json!("vorbis");
+    assert!(Source::from_stored(&serde_json::to_vec(&other_name).unwrap()).is_err());
+    // A field this build does not know, outside the source or inside it.
+    let mut outside: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    outside["note"] = serde_json::json!(1);
+    let mut inside = serde_json::from_slice::<serde_json::Value>(&stored).unwrap();
+    inside["source"]["note"] = serde_json::json!(1);
+    for extra in [outside, inside] {
+        assert!(Source::from_stored(&serde_json::to_vec(&extra).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn pictures_and_an_encoder_tag_come_back_from_the_stored_form() {
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/");
+    let picture = |mime, declared_type| Picture {
+        mime,
+        declared_type,
+        picture_type: 3,
+        description: "Front".into(),
+        bytes: 4,
+        sha256: "00".repeat(32),
+        width: 1,
+        height: 1,
+        structure_verified: true,
+        image_decode_verified: false,
+    };
+    let mut flac = read(&std::path::Path::new(fixtures).join("tone-flac.flac")).unwrap();
+    // The JSON leaves out which pictures declared a type; the stored form keeps it.
+    flac.artwork = vec![picture("image/png", true), picture("image/jpeg", false)];
+    let back = Source::from_stored(&flac.to_stored().unwrap()).unwrap();
+    assert_eq!(back, flac);
+    assert_eq!(
+        back.artwork
+            .iter()
+            .map(|p| p.declared_type)
+            .collect::<Vec<_>>(),
+        [true, false]
+    );
+    let mut mp3 = read(&std::path::Path::new(fixtures).join("tone-mp3-vbr.mp3")).unwrap();
+    let Some(timing::SeekHeader::Xing(xing)) = mp3.timing.as_mut().and_then(|t| t.header.as_mut())
+    else {
+        panic!("the VBR fixture has a Xing header");
+    };
+    xing.encoder = Some(timing::EncoderTag {
+        family: "LAME",
+        identifier_hex: "4c414d45332e313030".into(),
+        revision: 0,
+        method: 3,
+        delay_samples: 576,
+        padding_samples: 1152,
+        declared_trimmed_duration: timing::SampleDuration {
+            samples: 1,
+            sample_rate: 44_100,
+        },
+        raw_tag_sha256: "11".repeat(32),
+        crc_verified: true,
+    });
+    assert_eq!(Source::from_stored(&mp3.to_stored().unwrap()).unwrap(), mp3);
+}

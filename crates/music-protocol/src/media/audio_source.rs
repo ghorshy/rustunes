@@ -7,7 +7,7 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use anyhow::{Context, Result, bail, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::media::{
@@ -23,7 +23,7 @@ use crate::media::{
 const MAX_TEXT: usize = 64 * 1024;
 
 /// What a source of these formats carries in place of MPEG-1 frame timing.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stream {
     pub format: Format,
     /// PCM bits of a lossless format; 0 for a lossy one.
@@ -34,7 +34,10 @@ pub struct Stream {
     pub encoder_padding: u64,
     /// Samples a player plays: the coded ones less delay and padding.
     pub valid_samples: u64,
-    #[serde(skip)]
+    /// Not in the JSON; the stored form keeps it ([`Source::to_stored`]).
+    ///
+    /// [`Source::to_stored`]: crate::media::mpeg::Source::to_stored
+    #[serde(skip, default = "crate::media::mpeg::stored::no_encoded_audio")]
     pub encoded: EncodedAudio,
 }
 
@@ -83,7 +86,7 @@ pub(crate) fn read_layout(
             file_bytes: size,
             full_file_sha256: hex(&full),
             audio: EncodedMpeg {
-                format: "encoded-audio",
+                format: crate::media::mpeg::ENCODED_AUDIO,
                 sha256: hex(&e.sha256()),
                 frame_bytes_sha256: hex(&e.audio_sha256),
                 sample_rate: e.sample_rate,

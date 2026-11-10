@@ -329,3 +329,95 @@ fn an_unchanged_mp3_is_read_once_and_a_changed_one_again() {
     assert_eq!(mpeg(&path).unwrap(), first);
     assert_eq!(music_protocol::test_support::mpeg::reads(&path), 2);
 }
+
+#[test]
+fn an_mp3_read_persists_across_runs_for_the_same_file_identity() {
+    let dir = Temp::new("mpeg-disk");
+    let path = dir.0.join("tone.mp3");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/tone-mp3-vbr.mp3"
+        ),
+        &path,
+    )
+    .unwrap();
+    let key = key(&path).unwrap();
+    let source = mpeg::read(&path).unwrap();
+    let cache = dir.0.join("cache");
+    Disk::new(cache.clone(), true).store(&key, &source);
+    let later = Disk::new(cache.clone(), true);
+    assert!(later.load::<mpeg::Source>(&key) == Some(source.clone()));
+    let changed = Key {
+        ctime: (key.ctime.0, key.ctime.1 + 1),
+        ..key.clone()
+    };
+    assert!(later.load::<mpeg::Source>(&changed).is_none());
+    // A row this build cannot read back as written is a miss.
+    let c = rusqlite::Connection::open(cache.join("sources.sqlite")).unwrap();
+    c.execute("UPDATE mpeg SET source=?1", [b"{\"version\":0}".as_slice()])
+        .unwrap();
+    assert!(Disk::new(cache, true).load::<mpeg::Source>(&key).is_none());
+}
+
+#[test]
+fn a_cache_from_before_the_mpeg_table_keeps_its_rows() {
+    let dir = Temp::new("upgrade");
+    let path = alac(&dir.0);
+    let key = key(&path).unwrap();
+    let fingerprint = fingerprint::read(&path).unwrap();
+    let cache = dir.0.join("cache");
+    // The database as builds before the `mpeg` table made it, with a row.
+    let tables: Vec<_> = SCHEMA
+        .tables
+        .iter()
+        .copied()
+        .filter(|(name, _)| *name != "mpeg")
+        .collect();
+    assert_eq!(tables.len(), SCHEMA.tables.len() - 1);
+    let older = cache_database::Schema {
+        tables: Vec::leak(tables),
+        ..SCHEMA
+    };
+    let c = cache_database::open(&cache, &older).unwrap();
+    fingerprint.store(&c, &key).unwrap();
+    drop(c);
+    // This build adds the table and keeps the row.
+    let disk = Disk::new(cache.clone(), true);
+    assert!(disk.load::<fingerprint::SourceFingerprint>(&key) == Some(fingerprint));
+    assert!(!cache.join("sources.sqlite.unreadable").exists());
+    let tables: Vec<String> = rusqlite::Connection::open(cache.join("sources.sqlite"))
+        .unwrap()
+        .prepare("SELECT name FROM sqlite_schema ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(tables.iter().any(|t| t == "mpeg"), "{tables:?}");
+    assert!(!disk.warned.load(Ordering::Relaxed));
+}
+
+#[test]
+fn a_cache_whose_table_has_another_definition_is_set_aside() {
+    let dir = Temp::new("other-table");
+    let cache = dir.0.join("cache");
+    let tables: Vec<_> = SCHEMA
+        .tables
+        .iter()
+        .map(|&(name, sql)| match name {
+            "mpeg" => (
+                name,
+                "CREATE TABLE mpeg(path BLOB PRIMARY KEY) STRICT, WITHOUT ROWID",
+            ),
+            _ => (name, sql),
+        })
+        .collect();
+    let other = cache_database::Schema {
+        tables: Vec::leak(tables),
+        ..SCHEMA
+    };
+    drop(cache_database::open(&cache, &other).unwrap());
+    drop(cache_database::open(&cache, &SCHEMA).unwrap());
+    assert!(cache.join("sources.sqlite.unreadable").exists());
+}
