@@ -475,11 +475,48 @@ impl DeviceProvider {
         }
     }
 }
+/// How long a service connect waits while the mux daemon reopens a phone that
+/// stalled its port, and how often it tries again. netmuxd answers every
+/// Connect it cannot serve while it reopens the device with usbmuxd's generic
+/// "bad command" (Number 1), which `idevice` reports as
+/// `UsbmuxdError::BadCommand`; after the stall the phone refuses new muxes for
+/// about 13 s (E6/E7), and 20 s in the E8 run, so the same phone accepts a
+/// later attempt. Nothing reached the phone on a refused connect, so waiting
+/// costs no state.
+pub(crate) const REOPEN_WINDOW: Duration = Duration::from_secs(90);
+pub(crate) const REOPEN_DELAY: Duration = Duration::from_millis(500);
+/// Whether the daemon reported a connect it could not serve yet, rather than
+/// a phone that is not there or this host being refused.
+fn reopening(error: &IdeviceError) -> bool {
+    matches!(
+        error,
+        IdeviceError::Usbmuxd(idevice::usbmuxd::errors::UsbmuxdError::BadCommand)
+    )
+}
 type Connecting<T> = Pin<Box<dyn Future<Output = Result<T, IdeviceError>> + Send>>;
 impl IdeviceProvider for DeviceProvider {
+    /// Every ATC, Lockdown, AFC or artwork connection of a run goes through
+    /// here, so a port stall between steps waits for the port to come back
+    /// instead of failing the step that was about to start.
     fn connect(&self, port: u16) -> Connecting<Idevice> {
         match &self.route {
-            Route::Usb(provider) => provider.connect(port),
+            Route::Usb(provider) => {
+                let provider = provider.clone();
+                Box::pin(async move {
+                    let give_up = tokio::time::Instant::now() + REOPEN_WINDOW;
+                    loop {
+                        match provider.connect(port).await {
+                            Err(error)
+                                if reopening(&error)
+                                    && tokio::time::Instant::now() + REOPEN_DELAY < give_up =>
+                            {
+                                tokio::time::sleep(REOPEN_DELAY).await;
+                            }
+                            result => return result,
+                        }
+                    }
+                })
+            }
             Route::Wifi(phone) => phone.connect(port),
         }
     }
