@@ -395,7 +395,7 @@ fn inspect_inner(path: &Path, decode: bool, report: &mut Report) -> Result<()> {
                 report.artwork = Some(Artwork {
                     format: "jpeg",
                     converted_from: artwork.embedded.as_ref().map(|image| image.format),
-                    bytes: cover.bytes.len(),
+                    bytes: usize::try_from(cover.size)?,
                     sha256: hex(&cover.sha256),
                     native_checksum: cover.checksum,
                     image_decode_verified: false,

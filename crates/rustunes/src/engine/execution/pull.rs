@@ -480,14 +480,17 @@ fn source_cover(path: &Path) -> Option<(u64, [u8; 32])> {
     let other = music_protocol::media::mpeg::is_other_audio(path)
         || (crate::engine::planning::source_reads::fingerprint(path).is_err()
             && music_protocol::media::mpeg::read(path).is_ok());
-    let cover = if other {
-        mp3::artwork::batch_cover(path, &music_protocol::media::mpeg::read(path).ok()?).ok()?
+    let (size, sha256) = if other {
+        let source = music_protocol::media::mpeg::read(path).ok()?;
+        let cover = mp3::artwork::batch_cover(path, &source).ok().flatten()?;
+        (cover.bytes.len() as u64, cover.sha256)
     } else {
-        crate::engine::planning::source_reads::artwork(path)
+        let cover = crate::engine::planning::source_reads::artwork(path)
             .ok()?
-            .cover
-    }?;
-    Some((cover.bytes.len() as u64, cover.sha256))
+            .cover?;
+        (cover.size, cover.sha256)
+    };
+    Some((size, sha256))
 }
 
 /// Read back each cover `reconciled` names, in groups sharing a connection,
