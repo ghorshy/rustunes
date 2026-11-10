@@ -30,6 +30,12 @@ impl Catalog {
             "a removed track is not in the catalogue"
         );
         let kept = |track: &u64| !removed.contains(track);
+        let removed_pids: BTreeSet<i64> = self
+            .tracks
+            .iter()
+            .filter(|track| !kept(&track.sync_id))
+            .map(|track| track.internal_id)
+            .collect();
         let keyed = |map: &BTreeMap<u64, [u8; 32]>| {
             map.iter()
                 .filter(|(id, _)| kept(id))
@@ -172,6 +178,12 @@ impl Catalog {
                 .collect(),
             album_cache_ids,
             orphan_album_cache_ids,
+            track_token_rows: old
+                .track_token_rows
+                .iter()
+                .filter(|(pid, _)| !removed_pids.contains(pid))
+                .map(|(pid, rows)| (*pid, rows.clone()))
+                .collect(),
             ..old.clone()
         };
 

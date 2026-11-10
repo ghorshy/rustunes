@@ -341,6 +341,9 @@ pub(crate) struct Settled {
     pub(crate) inserted: usize,
     /// Tracks a session's removal half removed.
     pub(crate) removed: usize,
+    /// Inserted tracks whose source sent no cover but whose reused internal
+    /// item pid still held the phone's own registration, left as it was.
+    pub(crate) inherited_covers: usize,
 }
 
 /// What one target's row must be: its source's tags and the groups the plan
@@ -1448,6 +1451,9 @@ pub(crate) struct Resumed {
     pub(crate) inserted: usize,
     /// Tracks a session's removal half removed, observed now.
     pub(crate) removed: usize,
+    /// Inserted tracks whose reused internal item pid still held the phone's
+    /// own cover registration, left as it was.
+    pub(crate) inherited_covers: usize,
     /// The removal batch that took out the rows a Partial batch left
     /// without audio.
     pub(crate) compensation: Option<removal_batch::Settled>,
@@ -1489,6 +1495,7 @@ pub(crate) async fn resume(
                 evidence: batch.evidence.clone(),
                 inserted: 0,
                 removed: 0,
+                inherited_covers: 0,
                 compensation: None,
             }
         }
@@ -1499,6 +1506,7 @@ pub(crate) async fn resume(
                 evidence: settled.evidence,
                 inserted: settled.inserted,
                 removed: settled.removed,
+                inherited_covers: settled.inherited_covers,
                 compensation: None,
             }
         }
@@ -1507,6 +1515,7 @@ pub(crate) async fn resume(
             evidence: batch.evidence.clone(),
             inserted: bound(batch),
             removed: 0,
+            inherited_covers: 0,
             compensation: None,
         },
         other => bail!("insert batch {id} is {other:?} and needs no recovery"),
@@ -1758,6 +1767,7 @@ async fn settle_with(
             evidence: run,
             inserted: 0,
             removed: 0,
+            inherited_covers: 0,
         });
     }
     // The session's removals went with its operation, every one.
@@ -1920,6 +1930,10 @@ async fn settle_with(
             batch.id.as_i64()
         );
     }
+    // Covers the phone still held for a reused internal item pid, unchanged by
+    // this session. They are reported with the settled batch; the catalogue
+    // check above does not treat them as covers the batch sent.
+    let inherited_covers = catalogue.inherited_covers.len();
     let checks: Vec<TrackCheck> = bound
         .iter()
         .filter_map(|(ordinal, _)| {
@@ -2040,6 +2054,7 @@ async fn settle_with(
         evidence: run,
         inserted: bound.len(),
         removed: removing.len(),
+        inherited_covers,
     })
 }
 

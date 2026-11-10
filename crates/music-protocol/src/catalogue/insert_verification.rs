@@ -1093,6 +1093,13 @@ pub struct VerifiedInsertBatch {
     /// Targets inserted with their cover, and their albums' registrations.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub covers: Vec<InsertedCover>,
+    /// Targets whose source has no cover but whose reused internal item pid
+    /// still held the phone's own track-level token rows, unchanged by this
+    /// session. The phone deleted the item but kept its artwork registration;
+    /// the inserted row inherits it, and an `insert_track` without a cover
+    /// cannot name its removal.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inherited_covers: Vec<InheritedCover>,
     pub audio_and_artwork_bytes_verified_by_this_check: bool,
 }
 
@@ -1102,6 +1109,16 @@ pub struct InsertedCover {
     pub cache_id: u32,
     pub album_id: String,
     pub album_cache_id: Option<u32>,
+}
+
+/// A track-level token registration the batch inherited through a reused
+/// internal item pid rather than creating. `cache_id` is the canonical
+/// source300 cache ID when the inherited shape has one.
+#[derive(Serialize)]
+pub struct InheritedCover {
+    pub track_id: String,
+    pub item_pid: i64,
+    pub cache_id: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -1382,7 +1399,7 @@ fn verify_batch(
         );
     }
     let released = released_album_cache_ids(before, after, expected, covers);
-    let covers = verify_batch_covers(before, after, expected, locationless, removed, covers)?;
+    let checked = verify_batch_covers(before, after, expected, locationless, removed, covers)?;
     ensure!(
         before
             .artwork()
@@ -1432,7 +1449,8 @@ fn verify_batch(
             .collect(),
         dropped_orphan_album_registrations: orphans.len()
             - after.artwork().orphan_album_cache_ids().len(),
-        covers,
+        covers: checked.inserted,
+        inherited_covers: checked.inherited,
         audio_and_artwork_bytes_verified_by_this_check: false,
     })
 }
@@ -1470,6 +1488,13 @@ fn released_album_cache_ids(
         .collect()
 }
 
+/// Covers a batch inserted and registrations it inherited through reused item
+/// pids.
+struct BatchCovers {
+    inserted: Vec<InsertedCover>,
+    inherited: Vec<InheritedCover>,
+}
+
 /// The cover rules of `verify_insert_batch_covered`; prior track registrations
 /// were checked by the caller.
 fn verify_batch_covers(
@@ -1479,7 +1504,7 @@ fn verify_batch_covers(
     locationless: &BTreeSet<u64>,
     removed: &BTreeSet<u64>,
     covers: &BTreeMap<u64, u32>,
-) -> Result<Vec<InsertedCover>> {
+) -> Result<BatchCovers> {
     let (old, new) = (before.artwork(), after.artwork());
     ensure!(
         covers
@@ -1503,6 +1528,7 @@ fn verify_batch_covers(
         "an unplanned artwork cache ID appeared"
     );
     let mut album_covers: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
+    let mut inherited_covers = Vec::new();
     for target in expected {
         let registered = new.track_cache_ids().get(&target.track_id);
         match covers.get(&target.track_id) {
@@ -1521,14 +1547,28 @@ fn verify_batch_covers(
                 "inserted track {:016x} does not hold its cover",
                 target.track_id
             ),
-            None => ensure!(
-                registered.is_none()
-                    && !new
-                        .tracks_with_artwork_registration()
-                        .contains(&target.track_id),
-                "inserted track {:016x} gained an unplanned cover",
-                target.track_id
-            ),
+            None => {
+                let inherited = after
+                    .tracks()
+                    .iter()
+                    .find(|track| track.sync_id == target.track_id)
+                    .and_then(|track| inherited_cover(before, after, track));
+                match inherited {
+                    Some((item_pid, cache_id)) => inherited_covers.push(InheritedCover {
+                        track_id: format!("{:016x}", target.track_id),
+                        item_pid,
+                        cache_id,
+                    }),
+                    None => ensure!(
+                        registered.is_none()
+                            && !new
+                                .tracks_with_artwork_registration()
+                                .contains(&target.track_id),
+                        "inserted track {:016x} gained an unplanned cover",
+                        target.track_id
+                    ),
+                }
+            }
         }
         if let Some(cache) = covers.get(&target.track_id) {
             album_covers
@@ -1555,7 +1595,7 @@ fn verify_batch_covers(
             "album {album:016x} gained an unplanned cover registration"
         );
     }
-    Ok(expected
+    let inserted = expected
         .iter()
         .filter_map(|e| {
             covers.get(&e.track_id).map(|cache| InsertedCover {
@@ -1565,7 +1605,41 @@ fn verify_batch_covers(
                 album_cache_id: new.album_cache_ids().get(&e.album_id).copied(),
             })
         })
-        .collect())
+        .collect();
+    Ok(BatchCovers {
+        inserted,
+        inherited: inherited_covers,
+    })
+}
+
+/// A track-level registration the phone already held for the internal item
+/// pid this insert reused, when the session left it exactly as it was. The
+/// phone deletes an item but may keep its source300 track cover rows; a new
+/// row in the reused slot inherits them, and an `insert_track` without a cover
+/// cannot name their removal. Such a row is not a cover the batch sent, so the
+/// caller reports it instead of accepting or inventing one.
+fn inherited_cover(before: &Catalog, after: &Catalog, track: &Track) -> Option<(i64, Option<u32>)> {
+    let item_pid = track.internal_id;
+    if before
+        .tracks()
+        .iter()
+        .any(|prior| prior.internal_id == item_pid)
+    {
+        return None;
+    }
+    let old = before.artwork().track_token_rows(item_pid)?;
+    let now = after.artwork().track_token_rows(item_pid)?;
+    if old != now {
+        return None;
+    }
+    Some((
+        item_pid,
+        after
+            .artwork()
+            .track_cache_ids()
+            .get(&track.sync_id)
+            .copied(),
+    ))
 }
 
 /// Each present target references the existing composer of its name, or the
@@ -2269,6 +2343,38 @@ Line two' WHERE item_pid=2;
              INSERT INTO artwork_token VALUES(3,'677',300,1,0,0);",
         );
         assert!(verify_insert_batch(&before, &bad, &expected).is_err());
+    }
+
+    #[test]
+    fn an_uncovered_member_may_keep_a_reused_item_pids_old_cover_registration() {
+        // The phone kept a deleted item's track-level token row. The new
+        // track landed on that internal pid, so the row now names the new
+        // track although this batch sent no cover for it.
+        let orphan = art(&[], &[(2, 5608, 1, 0)]);
+        let before = compilation_state(0, &orphan);
+        let a = compilation_source("A", true);
+        let b = compilation_source("B", false);
+        let expected = [
+            compilation_expected(&a, true),
+            compilation_expected(&b, false),
+        ];
+        let after = compilation_state_at(2, 13, &orphan);
+        let checked = verify_insert_batch(&before, &after, &expected).unwrap();
+        assert!(checked.covers.is_empty());
+        assert_eq!(checked.inherited_covers.len(), 1);
+        assert_eq!(checked.inherited_covers[0].item_pid, 2);
+        assert_eq!(checked.inherited_covers[0].cache_id, Some(5608));
+
+        // A registration that appears only after the batch is still refused,
+        // even when its ID was already occupied by an orphan row.
+        let after = compilation_state_at(2, 13, &art(&[], &[(3, 5608, 1, 0)]));
+        let error = verify_insert_batch(&before, &after, &expected)
+            .err()
+            .expect("a new registration was accepted");
+        assert!(
+            format!("{error:#}").contains("gained an unplanned cover"),
+            "{error:#}"
+        );
     }
 
     #[test]

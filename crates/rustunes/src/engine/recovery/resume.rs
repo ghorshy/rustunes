@@ -214,6 +214,7 @@ async fn resume_insert_batch(
     let mut document = serde_json::json!({
         "schema":"rustunes.insert-batch-resume","batch":id,"kind":"insert",
         "status":state.as_str(),"inserted":resumed.inserted,"evidence":resumed.evidence,
+        "inherited_covers":resumed.inherited_covers,
         "compensation":compensation,"native_operation_replayed":false,
     });
     if let Some(removal) =

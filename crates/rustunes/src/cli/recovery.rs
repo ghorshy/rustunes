@@ -50,6 +50,12 @@ pub(super) fn render(report: &Report, json: bool) -> Result<bool> {
                         compensation["status"].as_str().unwrap_or_default()
                     );
                 }
+                let inherited = report.document["inherited_covers"].as_u64().unwrap_or(0);
+                if inherited > 0 {
+                    println!(
+                        "{inherited} inserted track(s) sent no cover but show the one the phone kept for the item id the insert reused."
+                    );
+                }
             }
         }
     }

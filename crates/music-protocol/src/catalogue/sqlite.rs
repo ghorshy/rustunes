@@ -269,6 +269,17 @@ pub struct CachedArtwork {
     pub relative_path: String,
 }
 
+/// One entity-type-0 artwork-token row exactly as the database stores it.
+/// Two rows with the same token text may still differ in source, artwork type
+/// or variant, so every field that identifies the row is kept.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TrackTokenRow {
+    token: Vec<u8>,
+    source: i64,
+    artwork_type: Option<i64>,
+    variant: Option<i64>,
+}
+
 #[derive(Clone)]
 pub struct ArtworkInventory {
     occupied_cache_ids: BTreeSet<u32>,
@@ -281,6 +292,12 @@ pub struct ArtworkInventory {
     other_source_rows: BTreeMap<i64, ArtworkRowCounts>,
     unmapped_source300_token_rows: usize,
     orphan_album_cache_ids: BTreeMap<i64, u32>,
+    /// Tracks' own token rows keyed by internal item pid, including rows whose
+    /// item the phone deleted without clearing them. A new track that reuses
+    /// the pid inherits them; an insert of an uncovered track cannot name
+    /// their removal, so the insert verification reports them instead of
+    /// treating them as covers the batch sent.
+    track_token_rows: BTreeMap<i64, BTreeSet<TrackTokenRow>>,
 }
 
 impl ArtworkInventory {
@@ -332,6 +349,13 @@ impl ArtworkInventory {
     /// and keep these tokens (observed); the ID stays occupied.
     pub fn orphan_album_cache_ids(&self) -> &BTreeMap<i64, u32> {
         &self.orphan_album_cache_ids
+    }
+
+    /// One internal item pid's entity-type-0 token rows exactly as stored.
+    /// Absence means the pid has no such row. The rows may belong to no live
+    /// item when the phone kept them across a deletion.
+    pub(crate) fn track_token_rows(&self, item_pid: i64) -> Option<&BTreeSet<TrackTokenRow>> {
+        self.track_token_rows.get(&item_pid)
     }
 }
 
@@ -2060,6 +2084,7 @@ fn parse_artwork(
         other_source_rows: BTreeMap::new(),
         unmapped_source300_token_rows: 0,
         orphan_album_cache_ids: BTreeMap::new(),
+        track_token_rows: BTreeMap::new(),
     };
     let track_ids: BTreeMap<_, _> = tracks
         .iter()
@@ -2141,6 +2166,32 @@ fn parse_artwork(
         seen += 1;
         ensure!(seen <= MAX_ROWS, "artwork relation row bound exceeded");
         let source = integer(row, "artwork_source_type")?;
+        // Keep every entity-type-0 row as stored, before any interpretation:
+        // the insert verification compares a reused item pid's rows with the
+        // ones this (possibly empty) catalogue already held.
+        if matches!(row.get_ref("entity_type")?, ValueRef::Integer(0))
+            && let ValueRef::Integer(item_pid) = row.get_ref("entity_pid")?
+            && let ValueRef::Text(token) = row.get_ref("artwork_token")?
+        {
+            let artwork_type = match row.get_ref("artwork_type")? {
+                ValueRef::Integer(value) => Some(value),
+                _ => None,
+            };
+            let variant = match row.get_ref("artwork_variant_type")? {
+                ValueRef::Integer(value) => Some(value),
+                _ => None,
+            };
+            inventory
+                .track_token_rows
+                .entry(item_pid)
+                .or_default()
+                .insert(TrackTokenRow {
+                    token: token.to_vec(),
+                    source,
+                    artwork_type,
+                    variant,
+                });
+        }
         let canonical_id = if source == 300 {
             let (id, canonical) = cache_id(row, tracks.is_empty())?;
             inventory.source300_rows.registration_rows += 1;

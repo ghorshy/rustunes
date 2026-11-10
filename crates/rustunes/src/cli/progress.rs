@@ -238,6 +238,7 @@ pub(super) fn line(event: &Event<'_>) -> Result<Option<String>> {
             inserted,
             total,
             removed: 0,
+            inherited: 0,
         } => {
             format!("Verified insert batch: {inserted}/{total} new tracks on the phone.")
         }
@@ -245,9 +246,22 @@ pub(super) fn line(event: &Event<'_>) -> Result<Option<String>> {
             inserted,
             total,
             removed,
-        } => format!(
-            "Verified insert batch: its session removed {removed} track(s), and {inserted}/{total} new tracks are on the phone."
-        ),
+            inherited,
+        } => {
+            let mut message = if *removed == 0 {
+                format!("Verified insert batch: {inserted}/{total} new tracks on the phone.")
+            } else {
+                format!(
+                    "Verified insert batch: its session removed {removed} track(s), and {inserted}/{total} new tracks are on the phone."
+                )
+            };
+            if *inherited > 0 {
+                message.push_str(&format!(
+                    " {inherited} of them sent no cover but show the one the phone kept for the item id the insert reused."
+                ));
+            }
+            message
+        }
         Event::UpdatesScheduled { tracks, sessions } => format!(
             "Metadata updates of {tracks} track(s) fit in {sessions} metadata session(s); each is planned again from a fresh capture."
         ),
