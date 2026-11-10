@@ -1448,10 +1448,12 @@ fn check_allowed(params: &Dictionary) -> Result<()> {
             && params["EducationModeEnabled"].as_boolean() == Some(false),
         "device is not ready for this unprotected manual Media session"
     );
-    strings(
-        params.get("DisabledAssetTypes"),
-        &["Photo", "Movie", "TVEpisode", "HomeVideo"],
-    )
+    // Photo sync is disabled where iCloud Photos is on (the iPhone 16 Pro
+    // Max first qualified) and allowed where it is off (an iPhone 13, iOS 27.2); this
+    // session sends only Music either way.
+    let disabled = params.get("DisabledAssetTypes");
+    strings(disabled, &["Photo", "Movie", "TVEpisode", "HomeVideo"])
+        .or_else(|_| strings(disabled, &["Movie", "TVEpisode", "HomeVideo"]))
 }
 
 struct SessionTransport(atc::Atc);
@@ -1696,6 +1698,31 @@ mod tests {
                 ),
             ])),
         )
+    }
+    #[test]
+    fn a_phone_that_allows_photo_sync_is_ready_too() {
+        let ready_with = |types: &[&str]| {
+            let mut message = allowed();
+            set(
+                &mut message,
+                &["Params", "DisabledAssetTypes"],
+                array(types),
+            );
+            check_allowed(
+                dictionary(&message).unwrap()["Params"]
+                    .as_dictionary()
+                    .unwrap(),
+            )
+        };
+        assert!(ready_with(&["Photo", "Movie", "TVEpisode", "HomeVideo"]).is_ok());
+        assert!(ready_with(&["Movie", "TVEpisode", "HomeVideo"]).is_ok());
+        for refused in [
+            &["Music", "Movie", "TVEpisode", "HomeVideo"][..],
+            &["Movie", "TVEpisode"],
+            &[],
+        ] {
+            assert!(ready_with(refused).is_err(), "{refused:?}");
+        }
     }
     fn ready_message() -> Value {
         let mut grappa = vec![7; 83];
