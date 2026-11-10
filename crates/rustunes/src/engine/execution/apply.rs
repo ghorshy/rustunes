@@ -162,6 +162,7 @@ pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<ApplyRe
         journal,
         current,
         current_directory,
+        link: crate::engine::execution::link::RunLink::new(options.trace.join("link")),
     };
     sequence::run(
         &validated.plan.sources,
@@ -186,6 +187,8 @@ struct ApplyState {
     journal: Journal,
     current: current::Current,
     current_directory: std::path::PathBuf,
+    /// One ATC link for the whole apply; opened by the first insertion.
+    link: crate::engine::execution::link::RunLink,
 }
 struct StepContext<'a> {
     engine: &'a Engine,
@@ -205,6 +208,7 @@ async fn apply_step(
         mut journal,
         mut current,
         mut current_directory,
+        mut link,
     } = state;
     let StepContext {
         engine,
@@ -268,6 +272,7 @@ async fn apply_step(
     // Keep a durable exact source for recovery if the caller later changes
     // the source directory while this operation is awaiting verification.
     let control = engine.control(180);
+    link.settle(&control).await?;
     retain_alac_source(&source_path, &source.fingerprint, &step, &control)?;
     let input = serde_json::json!({"schema":"rustunes.insertion-input",
         "plan_sha256":hex(&plan_sha256),"complete_index_sha256":hex(&index_sha256),
@@ -319,6 +324,7 @@ async fn apply_step(
             host_name: options.host_name,
         },
         &control,
+        &mut link,
     )
     .await
     .context(
@@ -377,6 +383,7 @@ async fn apply_step(
             journal,
             current,
             current_directory,
+            link,
         },
         receipt,
     })
@@ -628,6 +635,7 @@ async fn ordinary_insert(
     current: &mut current::Current,
     mut i: OrdinaryInsert<'_>,
     control: &Control,
+    link: &mut crate::engine::execution::link::RunLink,
 ) -> Result<native_insert::PendingVerification> {
     let frozen = refresh::FrozenIntent::new(i.prepared, i.selected, i.timestamp);
     for attempt in 1..=2u8 {
@@ -683,6 +691,7 @@ async fn ordinary_insert(
             &i.step.join("input.json"),
             &input_bytes,
             control,
+            link,
             device::provider,
         )
         .await;

@@ -7,6 +7,7 @@
 //! No retry, cleanup, deletion, or audio write occurs here.
 
 use crate::engine::execution::device::DeviceProvider;
+use crate::engine::execution::link::RunLink;
 use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
 use sha2::{Digest, Sha256};
@@ -34,7 +35,7 @@ use music_protocol::catalogue::sqlite::Catalog;
 use music_protocol::media::artwork::{self, Cover};
 use music_protocol::media::artwork_inventory;
 use music_protocol::media::fingerprint::{self, SourceFingerprint};
-use music_protocol::protocol::session::{self, Session};
+use music_protocol::protocol::session;
 use music_protocol::protocol::templates;
 use music_protocol::protocol::transfer::{
     Attributes, MAX_ASSET, MAX_AUDIO, MAX_BOUNDED_OPS, METADATA, SIGNATURE, Transfer, hex,
@@ -162,6 +163,7 @@ pub async fn execute<F, Fut>(
     journal: &mut Journal,
     update: ArtworkUpdate<'_, '_>,
     control: &Control,
+    link: &mut RunLink,
     connect: F,
 ) -> Result<PendingVerification>
 where
@@ -254,8 +256,14 @@ where
         let stage = format!("Airlock/Media/Artwork/{asset_id}");
         preflight(&mut afc, state, &prepared.content, &stage).await?;
         control.check()?;
-        let mut session =
-            Session::connect(&provider, session_prepared, update.trace, control.deadline).await?;
+        let mut session = link
+            .begin(
+                session_prepared,
+                update.trace,
+                state.common.device_identifier(),
+                control,
+            )
+            .await?;
         // Recheck the exact state in this Ready session, before ANY AFC write.
         preflight(&mut afc, state, &prepared.content, &stage).await?;
         source.check()?;
@@ -296,7 +304,7 @@ where
         session.complete_artwork(&asset_id).await?;
         session.wait_finished().await?;
         let terminal = session.terminal_receipt_sha256()?;
-        drop(session);
+        link.keep(session.into_link().await.ok());
         let permanent = verify_audio(&mut afc, &prepared.content).await?;
         source.check()?;
         control.check()?;

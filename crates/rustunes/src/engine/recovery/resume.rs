@@ -254,6 +254,8 @@ async fn compensate_insert(
         .active_coordination()?
         .map(|c| c.id);
     let content = &attempt.prepared.content;
+    let mut link = crate::engine::execution::link::RunLink::new(directory.join("link"));
+    link.settle(control).await?;
     let removal = removal_batch::compensate(
         journal_path,
         identity,
@@ -264,6 +266,7 @@ async fn compensate_insert(
         coordination,
         HOST_NAME,
         control,
+        &mut link,
     )
     .await?;
     let state = Journal::open_read_only(journal_path, identity)?

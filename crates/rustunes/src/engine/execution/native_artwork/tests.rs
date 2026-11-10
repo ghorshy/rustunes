@@ -307,6 +307,7 @@ async fn guards_and_discovery_failure_leave_prepared_and_never_connect_on_bad_so
             fingerprint.full_file_sha256[0] ^= 1;
         }
         let trace = temp.0.join(if valid { "valid" } else { "invalid" });
+        let mut link = crate::engine::execution::link::RunLink::new(temp.0.join("link"));
         let result = execute(
             &mut journal,
             ArtworkUpdate {
@@ -318,6 +319,7 @@ async fn guards_and_discovery_failure_leave_prepared_and_never_connect_on_bad_so
                 trace: &trace,
             },
             &control(),
+            &mut link,
             || async {
                 calls.fetch_add(1, Ordering::SeqCst);
                 anyhow::bail!("synthetic connector refuses discovery")
@@ -424,6 +426,7 @@ async fn interrupted_started_and_cancelled_deadline_never_open_connector() {
         } else {
             control.cancelled.store(true, Ordering::Relaxed);
         }
+        let mut link = crate::engine::execution::link::RunLink::new(temp.0.join("link"));
         let result = execute(
             &mut journal,
             ArtworkUpdate {
@@ -435,6 +438,7 @@ async fn interrupted_started_and_cancelled_deadline_never_open_connector() {
                 trace: &trace,
             },
             &control,
+            &mut link,
             || async { panic!("cancelled artwork reached connector") },
         )
         .await;
@@ -461,6 +465,7 @@ async fn interrupted_started_and_cancelled_deadline_never_open_connector() {
         .unwrap(),
     )
     .unwrap();
+    let mut link = crate::engine::execution::link::RunLink::new(temp.0.join("link"));
     let result = execute(
         &mut journal,
         ArtworkUpdate {
@@ -472,6 +477,7 @@ async fn interrupted_started_and_cancelled_deadline_never_open_connector() {
             trace: &trace,
         },
         &control(),
+        &mut link,
         || async { panic!("interrupted artwork reached connector") },
     )
     .await;

@@ -493,6 +493,7 @@ async fn deferred_source_failure_does_not_prepare_or_poll_connector() {
     bytes[20] ^= 1;
     fs::write(&source, bytes).unwrap();
     let called = AtomicBool::new(false);
+    let mut link = crate::engine::execution::link::RunLink::new(temp.0.join("link"));
     let result = execute_new_native_insert(
         &mut journal,
         Insertion {
@@ -506,6 +507,7 @@ async fn deferred_source_failure_does_not_prepare_or_poll_connector() {
         &temp.0.join("input.json"),
         input,
         &control(),
+        &mut link,
         || async {
             called.store(true, Ordering::Relaxed);
             anyhow::bail!("connector must not be polled")
@@ -530,6 +532,7 @@ async fn production_missing_cdb_binding_never_invokes_connector_or_creates_trace
     intent.input_receipt_sha256 = Sha256::digest(input).into();
     let called = AtomicBool::new(false);
     let trace = temp.0.join("trace");
+    let mut link = crate::engine::execution::link::RunLink::new(temp.0.join("link"));
     let result = execute_new_native_insert(
         &mut journal,
         Insertion {
@@ -543,6 +546,7 @@ async fn production_missing_cdb_binding_never_invokes_connector_or_creates_trace
         &temp.0.join("input.json"),
         input,
         &control(),
+        &mut link,
         || async {
             called.store(true, Ordering::Relaxed);
             anyhow::bail!("must not connect")

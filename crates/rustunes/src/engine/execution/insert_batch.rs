@@ -31,6 +31,7 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::{
     engine::execution::device,
+    engine::execution::link::RunLink,
     engine::execution::native_artwork,
     engine::execution::native_insert::{
         self, BoundSource, Control, FreshState, create_trace, durable_write, sync_trace,
@@ -65,7 +66,7 @@ use music_protocol::catalogue::mutation;
 use music_protocol::media::artwork::{self, Cover};
 use music_protocol::media::fingerprint::{SourceFingerprint, TransferredSource};
 use music_protocol::media::metadata::{self, Metadata};
-use music_protocol::protocol::session::{self, Session};
+use music_protocol::protocol::session;
 use music_protocol::protocol::templates;
 use music_protocol::protocol::transfer::{MAX_ASSET, MAX_SESSION_OPS, Transfer};
 
@@ -471,6 +472,7 @@ pub(crate) async fn run(
     coordination: Option<CoordinationId>,
     host_name: &str,
     control: &Control,
+    link: &mut RunLink,
 ) -> Result<Settled> {
     control.check()?;
     ensure!(!members.is_empty(), "insert batch has no members");
@@ -607,6 +609,7 @@ pub(crate) async fn run(
         &operation,
         evidence,
         control,
+        link,
         // From here the batch is Started: nothing on the phone changed yet,
         // and only observation may settle it.
         |ready, signature| match session {
@@ -841,6 +844,7 @@ pub(crate) async fn send_session<T: session::StartedOperation>(
     operation: &[u8],
     evidence: &Path,
     control: &Control,
+    link: &mut RunLink,
     start: impl FnOnce([u8; 32], [u8; 21]) -> Result<T>,
 ) -> Sent {
     let current = &before.current;
@@ -897,8 +901,10 @@ pub(crate) async fn send_session<T: session::StartedOperation>(
             source.check()?;
         }
         control.check()?;
-        let live = session
-            .insert(Session::connect(found, session_prepared, &send, control.deadline).await?);
+        let live = session.insert(
+            link.begin(session_prepared, &send, &current.device, control)
+                .await?,
+        );
         crate::engine::execution::native_insert::batch_guard(afc, &state, &names).await?;
         artwork_guard(afc, &covered, artwork_db).await?;
         for source in held.iter() {
@@ -1022,15 +1028,16 @@ pub(crate) async fn send_session<T: session::StartedOperation>(
         }
         drop(upload);
         session.wait_finished().await?;
-        Ok(Wire {
+        let wire = Wire {
             ready,
             terminal: session.terminal_receipt_sha256()?,
             operation: sha(started.operation()),
             uploaded,
-        })
+        };
+        link.keep(session.into_link().await.ok());
+        Ok(wire)
     })
     .await;
-    drop(session);
     Sent::Started(wire)
 }
 
@@ -1092,6 +1099,7 @@ pub(crate) async fn add_all(
     run_directory: &Path,
     host_name: &str,
     control: impl Fn() -> Control,
+    link: &mut RunLink,
     converter: Option<&flac_to_alac::Converter>,
     mut progress: impl FnMut(&Settled, usize, usize) -> Result<()>,
     mut left_out: impl FnMut(&Member) -> Result<()>,
@@ -1101,6 +1109,12 @@ pub(crate) async fn add_all(
         removals.len() < batch_size,
         "a batch's session removes fewer tracks than the batch size"
     );
+    // The run's one link, opened before the first capture: the refresh it may
+    // start stalls the port well before any batch is Started.
+    if !members.is_empty() || !removals.is_empty() {
+        let control = control();
+        link.settle(&control).await?;
+    }
     let total = members.len();
     let bytes = members
         .iter()
@@ -1190,6 +1204,7 @@ pub(crate) async fn add_all(
             coordination,
             host_name,
             &control,
+            link,
         )
         .await
         .with_context(|| {
@@ -1207,7 +1222,8 @@ pub(crate) async fn add_all(
         if batch.state == InsertBatchState::Partial {
             let record = Journal::open(journal_path, identity)?.insert_batch(batch.batch)?;
             let unfilled = unfilled(&record).len();
-            let removal = compensate(journal_path, identity, &record, host_name, &control)
+            let removal =
+                compensate(journal_path, identity, &record, host_name, &control, link)
                 .await
                 .with_context(|| {
                     format!(
@@ -1273,6 +1289,7 @@ pub(crate) async fn add_all(
             &directory,
             host_name,
             control,
+            link,
             |_, _, _| Ok(()),
         ))
         .await?;
@@ -1380,6 +1397,7 @@ pub(crate) async fn compensate(
     batch: &InsertBatchRecord,
     host_name: &str,
     control: &Control,
+    link: &mut RunLink,
 ) -> Result<removal_batch::Settled> {
     ensure!(
         batch.state == InsertBatchState::Partial,
@@ -1403,6 +1421,7 @@ pub(crate) async fn compensate(
         batch.coordination,
         host_name,
         control,
+        link,
     )
     .await
 }
@@ -1523,8 +1542,19 @@ pub(crate) async fn resume(
     if resumed.state == InsertBatchState::Partial {
         let record = journal.insert_batch(batch.id)?;
         drop(journal);
-        resumed.compensation =
-            Some(compensate(journal_path, identity, &record, host_name, control).await?);
+        let mut link = RunLink::new(batch.evidence.join("link"));
+        link.settle(control).await?;
+        resumed.compensation = Some(
+            compensate(
+                journal_path,
+                identity,
+                &record,
+                host_name,
+                control,
+                &mut link,
+            )
+            .await?,
+        );
         resumed.state = Journal::open(journal_path, identity)?
             .insert_batch(batch.id)?
             .state;

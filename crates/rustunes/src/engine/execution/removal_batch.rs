@@ -32,6 +32,7 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::{
     engine::execution::device,
+    engine::execution::link::RunLink,
     engine::execution::native_insert::{
         Control, FreshState, create_trace, durable_write, sync_trace,
     },
@@ -55,7 +56,7 @@ use crate::{
 };
 use music_protocol::catalogue::identity::{self, LibraryIdentity};
 use music_protocol::catalogue::mutation;
-use music_protocol::protocol::session::{self, Session, StartedOperation};
+use music_protocol::protocol::session::{self, StartedOperation};
 use music_protocol::protocol::templates;
 use music_protocol::protocol::transfer::{
     Attributes, MAX_ASSET, MAX_BOUNDED_OPS, METADATA, SIGNATURE, Transfer, regular_size,
@@ -427,6 +428,7 @@ pub(crate) async fn run(
     coordination: Option<CoordinationId>,
     host_name: &str,
     control: &Control,
+    link: &mut RunLink,
 ) -> Result<Settled> {
     control.check()?;
     ensure!(
@@ -494,7 +496,7 @@ pub(crate) async fn run(
         _ => Requests::Unfilled(tracks),
     };
     send_and_settle(
-        journal, identity, before, id, &operation, requests, input_sha, host_name, control,
+        journal, identity, before, id, &operation, requests, input_sha, host_name, control, link,
     )
     .await
 }
@@ -511,6 +513,7 @@ pub(crate) async fn run_playlists(
     coordination: CoordinationId,
     host_name: &str,
     control: &Control,
+    link: &mut RunLink,
 ) -> Result<Settled> {
     control.check()?;
     ensure!(
@@ -576,6 +579,7 @@ pub(crate) async fn run_playlists(
         input_sha,
         host_name,
         control,
+        link,
     )
     .await
 }
@@ -593,6 +597,7 @@ async fn send_and_settle(
     input_sha: [u8; 32],
     host_name: &str,
     control: &Control,
+    link: &mut RunLink,
 ) -> Result<Settled> {
     let send = before.directory.join("send");
     let wire = match send_metadata_only(
@@ -603,6 +608,7 @@ async fn send_and_settle(
         host_name,
         &send,
         control,
+        link,
         |ready, signature| journal.start_removal_batch(id, ready, signature),
     )
     .await
@@ -722,8 +728,14 @@ pub(crate) async fn send_metadata_only<T: StartedOperation>(
     host_name: &str,
     send: &Path,
     control: &Control,
+    link: &mut RunLink,
     start: impl FnOnce([u8; 32], [u8; 21]) -> Result<T>,
 ) -> Sent {
+    // The run's first link waits out the refresh before any session starts.
+    // A failure here sent nothing, so the caller cancels its Prepared record.
+    if let Err(error) = link.settle(control).await {
+        return Sent::Unsent(error);
+    }
     let current = &before.current;
     let prepared = (|| {
         let artwork = current
@@ -818,8 +830,10 @@ pub(crate) async fn send_metadata_only<T: StartedOperation>(
         );
         guard(afc, &state, artwork.len() as u64, artwork_sha).await?;
         control.check()?;
-        let live = session
-            .insert(Session::connect(&provider, session_prepared, send, control.deadline).await?);
+        let live = session.insert(
+            link.begin(session_prepared, send, &current.device, control)
+                .await?,
+        );
         guard(afc, &state, artwork.len() as u64, artwork_sha).await?;
         let signature = live.sign_metadata(operation)?;
         durable_write(send, "operation.cig", &signature)?;
@@ -852,14 +866,15 @@ pub(crate) async fn send_metadata_only<T: StartedOperation>(
         control.check()?;
         session.finish_metadata().await?;
         session.wait_metadata_only_with_policy(&policy).await?;
-        Ok((
+        let wire = (
             ready,
             session.terminal_receipt_sha256()?,
             sha(started.operation()),
-        ))
+        );
+        link.keep(session.into_link().await.ok());
+        Ok(wire)
     })
     .await;
-    drop(session);
     drop(afc);
     Sent::Started(wire)
 }
@@ -880,9 +895,14 @@ pub(crate) async fn remove_all(
     run_directory: &Path,
     host_name: &str,
     control: impl Fn() -> Control,
+    link: &mut RunLink,
     mut progress: impl FnMut(&Settled, usize, usize) -> Result<()>,
 ) -> Result<Vec<Settled>> {
     ensure!(batch_size > 0, "batch size must be positive");
+    if !tracks.is_empty() {
+        let control = control();
+        link.settle(&control).await?;
+    }
     let mut settled = Vec::new();
     let mut removed = 0;
     for (number, chunk) in tracks.chunks(batch_size).enumerate() {
@@ -915,6 +935,7 @@ pub(crate) async fn remove_all(
                     coordination,
                     host_name,
                     &control,
+                    link,
                 )
                 .await
             }
@@ -962,6 +983,7 @@ pub(crate) async fn compensate(
     coordination: Option<CoordinationId>,
     host_name: &str,
     control: &Control,
+    link: &mut RunLink,
 ) -> Result<Settled> {
     ensure!(
         purpose != Purpose::Remove && !tracks.is_empty() && planned.len() == tracks.len(),
@@ -1015,6 +1037,7 @@ pub(crate) async fn compensate(
         coordination,
         host_name,
         control,
+        link,
     )
     .await
 }

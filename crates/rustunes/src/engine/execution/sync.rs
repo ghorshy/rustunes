@@ -65,7 +65,7 @@ pub struct Options<'a> {
 const CONTINUATIONS: usize = 3;
 
 pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<SyncResult> {
-    let mut result = Box::pin(run_with(options, None, engine)).await;
+    let mut result = Box::pin(run_with(options, None, engine, None)).await;
     let mut removed = 0;
     if let Some(first) = result.as_ref().err().and_then(removed_first) {
         removed += first.0;
@@ -77,6 +77,7 @@ pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<SyncRes
             },
             None,
             engine,
+            None,
         ))
         .await;
     }
@@ -99,6 +100,7 @@ pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<SyncRes
             },
             None,
             engine,
+            None,
         ))
         .await;
     }
@@ -143,6 +145,7 @@ pub(crate) async fn run_with(
     options: Options<'_>,
     coordination: Option<CoordinationId>,
     engine: &Engine,
+    shared: Option<&mut crate::engine::execution::link::RunLink>,
 ) -> Result<SyncResult> {
     engine.check()?;
     ensure!(
@@ -161,6 +164,15 @@ pub(crate) async fn run_with(
     crate::engine::planning::source_collection::select(options.source, options.selection)?;
     let run = layout::new_run(options.state)?;
     engine.emit(Event::RunEvidence(&run))?;
+    // One ATC link for the whole run: removals, covers, insert batches and
+    // metadata sessions share it, and its first open waits out the refresh.
+    let mut owned = None;
+    let link = match shared {
+        Some(link) => link,
+        None => owned.insert(crate::engine::execution::link::RunLink::new(
+            run.join("link"),
+        )),
+    };
     let snapshot_path = match options.snapshot {
         Some(path) => std::fs::canonicalize(path).context("opening supplied snapshot")?,
         None => {
@@ -278,12 +290,14 @@ pub(crate) async fn run_with(
     )?;
     File::open(&run)?.sync_all()?;
     if remove_first {
-        let removed = Box::pin(remove_alone(&options, &saved, &journal, &run, engine)).await?;
+        let removed =
+            Box::pin(remove_alone(&options, &saved, &journal, &run, engine, link)).await?;
         return Err(RemovedFirst(removed).into());
     }
     if let Some(holds) = held {
         // The removals go even so, as they would have before the sync.
-        let removed = Box::pin(remove_alone(&options, &saved, &journal, &run, engine)).await?;
+        let removed =
+            Box::pin(remove_alone(&options, &saved, &journal, &run, engine, link)).await?;
         let hint = hint(&holds, &options, coordination, &engine.command_options());
         engine.emit(Event::SyncBlocked(&SyncHolds {
             holds,
@@ -310,7 +324,7 @@ pub(crate) async fn run_with(
             })?,
             Err(error) => {
                 let removed =
-                    Box::pin(remove_alone(&options, &saved, &journal, &run, engine)).await?;
+                    Box::pin(remove_alone(&options, &saved, &journal, &run, engine, link)).await?;
                 engine.emit(Event::UpdatesRefused(&format!("{error:#}")))?;
                 engine.emit(Event::SyncBlocked(&SyncHolds {
                     holds: Vec::new(),
@@ -518,6 +532,7 @@ pub(crate) async fn run_with(
                 &run,
                 &mut batched.members,
                 batched.scope,
+                link,
             )
             .await?;
             covers_left_out = added.covers_left_out;
@@ -531,7 +546,7 @@ pub(crate) async fn run_with(
             // plans again without them, as when they must go first.
             if !options.removals.is_empty() {
                 let removed =
-                    Box::pin(remove_alone(&options, &saved, &journal, &run, engine)).await?;
+                    Box::pin(remove_alone(&options, &saved, &journal, &run, engine, link)).await?;
                 return Err(RemovedFirst(removed).into());
             }
             removed = 0;
@@ -574,6 +589,7 @@ pub(crate) async fn run_with(
                 pending_cover_only: options.add_only,
             },
             engine,
+            link,
         ))
         .await?;
     }
@@ -593,6 +609,7 @@ pub(crate) async fn run_with(
             },
             coordination,
             engine,
+            Some(link),
         ))
         .await?;
         // The fresh sync plans the same sources again.
@@ -611,6 +628,7 @@ pub(crate) async fn run_with(
             &directory,
             options.host_name,
             || engine.control(options.seconds),
+            link,
             |session, sessions| engine.emit(Event::MetadataBatchVerified { session, sessions }),
         )
         .await
@@ -725,6 +743,7 @@ async fn add_in_batches(
     run: &Path,
     members: &mut [insert_batch::Member],
     scope: [u8; 32],
+    link: &mut crate::engine::execution::link::RunLink,
 ) -> Result<Added> {
     let identity = Identity::for_saved_device(
         saved.identity.device_identifier_sha256,
@@ -772,6 +791,7 @@ async fn add_in_batches(
         &audio,
         options.host_name,
         || engine.control(options.seconds),
+        link,
         converter.as_ref(),
         |settled, inserted, total| {
             engine.emit(Event::InsertBatchVerified {
@@ -818,6 +838,7 @@ async fn remove_alone(
     journal: &Path,
     run: &Path,
     engine: &Engine,
+    link: &mut crate::engine::execution::link::RunLink,
 ) -> Result<usize> {
     if options.removals.is_empty() {
         return Ok(0);
@@ -837,6 +858,7 @@ async fn remove_alone(
         &directory,
         options.host_name,
         || engine.control(options.seconds),
+        link,
         |_, _, _| Ok(()),
     )
     .await

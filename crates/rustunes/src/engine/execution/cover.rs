@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     engine::execution::device,
+    engine::execution::link::RunLink,
     engine::execution::native_artwork::{self, ArtworkUpdate, FreshArtworkState},
     engine::state::current::{self, hex},
     engine::state::journal::{
@@ -44,7 +45,11 @@ pub struct Options<'a> {
     pub pending_cover_only: bool,
 }
 
-pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<CoverResult> {
+pub(crate) async fn run(
+    options: Options<'_>,
+    engine: &Engine,
+    link: &mut RunLink,
+) -> Result<CoverResult> {
     engine.check()?;
     ensure!(
         !options.trace.try_exists()?,
@@ -229,6 +234,10 @@ pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<CoverRe
         sha256: cover.sha256,
     });
     let track_id = content.track_pid;
+    // The run's link, settled before this cover's session: the refresh a new
+    // link starts may stall the port, and nothing is Started yet.
+    let control = engine.control(180);
+    link.settle(&control).await?;
     let attempt = journal.prepare(PreparedAttempt {
         kind: AttemptKind::Artwork,
         content,
@@ -241,7 +250,7 @@ pub(crate) async fn run(options: Options<'_>, engine: &Engine) -> Result<CoverRe
     engine.emit(Event::ArtworkStarted { track_id })?;
     let pending=native_artwork::execute(&mut journal,ArtworkUpdate{attempt,source:options.file,desired_source:&desired,state:&state,
         host_name:options.host_name,trace:&options.trace.join("transfer")},
-        &engine.control(180),device::provider).await
+        &control,link,device::provider).await
         .context("artwork update did not reach independent verification; inspect the journal before retrying")?;
     let after_control = engine.control(120);
     let after = current::capture_with_artwork_controlled(

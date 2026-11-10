@@ -634,6 +634,9 @@ pub async fn run(
     };
     let sent = &selected[..selected.len() - left.len()];
     let batches = sent.len().div_ceil(batch_size);
+    // One ATC link for the whole deletion: the removal and the playlist
+    // session that finishes a clear share it.
+    let mut link = crate::engine::execution::link::RunLink::new(run.join("link"));
     let mut settled = removal_batch::remove_all(
         &journal_path,
         &identity,
@@ -643,6 +646,7 @@ pub async fn run(
         &run,
         &o.host_name,
         || engine.control(o.seconds),
+        &mut link,
         {
             let mut number = 0;
             move |_, _, _| {
@@ -670,6 +674,7 @@ pub async fn run(
             &playlists.delete,
             &o.host_name,
             || engine.control(o.seconds),
+            &mut link,
         )
         .await
         .with_context(|| {
@@ -764,6 +769,7 @@ async fn finish_clear(
     confirmed: &[(i64, String)],
     host_name: &str,
     control: impl Fn() -> crate::engine::execution::native_insert::Control,
+    link: &mut crate::engine::execution::link::RunLink,
 ) -> Result<Option<removal_batch::Settled>> {
     let mut batch = None;
     let mut attempt = 1;
@@ -810,6 +816,7 @@ async fn finish_clear(
             id,
             host_name,
             &control,
+            link,
         )
         .await;
         drop(journal);
