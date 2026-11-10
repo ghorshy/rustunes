@@ -799,8 +799,12 @@ fn sort_kept_or_sent(
     match (old, sent) {
         (_, Some(None)) => {}
         (Some(old), _) => ensure!(new == old, "prior {what} changed its sort name"),
+        // The phone drops a byte order mark (U+FEFF) a sent name held when
+        // it makes the sort name (seen on iOS 27.2).
         (None, Some(Some(sorts))) => ensure!(
-            new.as_deref().is_some_and(|sort| sorts.contains(sort)),
+            new.as_deref().is_some_and(|sort| sorts
+                .iter()
+                .any(|sent_sort| *sent_sort == sort || sent_sort.replace('\u{feff}', "") == sort)),
             "new {what} sort name differs from what was sent"
         ),
         (None, None) => {}
@@ -1834,6 +1838,23 @@ mod tests {
             file_bytes: 1000,
             metadata: source.into(),
             presented: false,
+        }
+    }
+
+    #[test]
+    fn a_new_group_may_lose_a_byte_order_mark_from_its_sort_name() {
+        let sent = Some(BTreeSet::from(["Artist One; \u{feff}Artist Two"]));
+        let stored = |sort: &str| {
+            sort_kept_or_sent("track artist", None, &Some(sort.to_owned()), Some(&sent))
+        };
+        assert!(stored("Artist One; \u{feff}Artist Two").is_ok());
+        assert!(stored("Artist One; Artist Two").is_ok());
+        for other in [
+            "Artist One; Artist 2",
+            "Artist One;Artist Two",
+            "Artist Two",
+        ] {
+            assert!(stored(other).is_err(), "{other}");
         }
     }
 
