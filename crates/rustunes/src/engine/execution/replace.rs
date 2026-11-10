@@ -388,8 +388,20 @@ pub(crate) async fn run(
         id,
         &engine.command_options(),
     )?;
+    // One ATC link for the replacement: its removals and its adding sync.
+    let mut link = crate::engine::execution::link::RunLink::new(run.join("link"));
     let removed = if phase(&journal_path, &identity, id)? < ADDING {
-        let removed = remove(&r, engine, &journal_path, &identity, id, &run, &targets).await?;
+        let removed = remove(
+            &r,
+            engine,
+            &journal_path,
+            &identity,
+            id,
+            &run,
+            &targets,
+            &mut link,
+        )
+        .await?;
         let after = capture(engine, &run.join("removed-snapshot"), r.seconds).await?;
         let left = removal_targets(r.kind, &intent, &after)?;
         ensure!(
@@ -438,6 +450,7 @@ pub(crate) async fn run(
         },
         Some(id),
         engine,
+        Some(&mut link),
     ))
     .await
     .with_context(|| {
@@ -774,6 +787,7 @@ async fn remove(
     id: CoordinationId,
     run: &Path,
     targets: &[u64],
+    link: &mut crate::engine::execution::link::RunLink,
 ) -> Result<usize> {
     engine.emit(Event::ReplacementPhase {
         coordination: id.as_i64(),
@@ -793,6 +807,7 @@ async fn remove(
         &directory,
         r.host_name,
         || engine.control(r.seconds),
+        link,
         |_, removed, total| engine.emit(Event::ReplacementRemoved { removed, total }),
     )
     .await

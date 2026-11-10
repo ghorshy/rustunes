@@ -20,6 +20,7 @@ use std::{
 };
 
 use crate::engine::execution::device::DeviceProvider;
+use crate::engine::execution::link::RunLink;
 use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
 use sha2::{Digest, Sha256};
@@ -32,7 +33,7 @@ use crate::engine::state::journal::{
     AttemptId, AttemptKind, Content, Identity, Journal, PreparedAttempt, StartEvidence,
     StartedPermit,
 };
-use music_protocol::protocol::session::{self, Session};
+use music_protocol::protocol::session;
 use music_protocol::protocol::transfer::{
     MAX_AUDIO, MAX_BOUNDED_OPS, MAX_SESSION_OPS, METADATA, SIGNATURE, Transfer, hex, same_file,
 };
@@ -95,6 +96,7 @@ pub(crate) async fn execute_new_native_insert<F, Fut>(
     input_path: &Path,
     input_bytes: &[u8],
     control: &Control,
+    link: &mut RunLink,
     connect: F,
 ) -> Result<PendingVerification>
 where
@@ -125,6 +127,7 @@ where
         input_path,
         input_bytes,
         control,
+        link,
         connect,
     )
     .await
@@ -204,6 +207,7 @@ async fn execute_insert_inner<F, Fut>(
     input_path: &Path,
     input_bytes: &[u8],
     control: &Control,
+    link: &mut RunLink,
     connect: F,
 ) -> Result<PendingVerification>
 where
@@ -328,13 +332,14 @@ where
             guarded,
         )?;
         control.check()?;
-        let mut session = Session::connect(
-            &provider,
-            session_prepared,
-            insertion.trace,
-            control.deadline,
-        )
-        .await?;
+        let mut session = link
+            .begin(
+                session_prepared,
+                insertion.trace,
+                insertion.state.device_identifier(),
+                control,
+            )
+            .await?;
         // Every mutable prerequisite is checked again in this exact Ready
         // session, before recording Started and before the first AFC write.
         state.guard(&mut afc).await?;
@@ -392,7 +397,7 @@ where
         session.complete_audio(&asset_id, destination).await?;
         session.wait_finished().await?;
         let terminal_sha256 = session.terminal_receipt_sha256()?;
-        drop(session);
+        link.keep(session.into_link().await.ok());
         let permanent = afc
             .stat(destination)
             .await?

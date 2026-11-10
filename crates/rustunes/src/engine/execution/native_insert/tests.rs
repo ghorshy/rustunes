@@ -409,6 +409,7 @@ async fn deferred_source_failure_does_not_prepare_or_poll_connector() {
     bytes[20] ^= 1;
     fs::write(&source, bytes).unwrap();
     let called = AtomicBool::new(false);
+    let mut link = crate::engine::execution::link::RunLink::new(temp.0.join("link"));
     let result = execute_new_native_insert(
         &mut journal,
         Insertion {
@@ -421,6 +422,7 @@ async fn deferred_source_failure_does_not_prepare_or_poll_connector() {
         &temp.0.join("input.json"),
         input,
         &control(),
+        &mut link,
         || async {
             called.store(true, Ordering::Relaxed);
             anyhow::bail!("connector must not be polled")

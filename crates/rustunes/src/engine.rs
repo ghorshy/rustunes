@@ -243,8 +243,9 @@ impl Engine {
     }
     pub async fn cover(&self, request: CoverRequest<'_>) -> Result<CoverResult> {
         self.check()?;
+        let mut link = execution::link::RunLink::new(request.trace.join("link"));
         self.scope(Box::pin(crate::engine::execution::cover::run_retrying(
-            request, self,
+            request, self, &mut link,
         )))
         .await
     }

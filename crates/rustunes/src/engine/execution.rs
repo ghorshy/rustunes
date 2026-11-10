@@ -10,6 +10,7 @@ pub(crate) mod init;
 pub(crate) mod insert;
 pub(crate) mod insert_batch;
 pub(crate) mod leftover_files;
+pub(crate) mod link;
 pub(crate) mod metadata_batch;
 pub(crate) mod native_artwork;
 pub(crate) mod native_insert;

@@ -118,6 +118,7 @@ pub(crate) async fn run(
     coordination: Option<CoordinationId>,
     host_name: &str,
     control: &Control,
+    link: &mut crate::engine::execution::link::RunLink,
 ) -> Result<Settled> {
     control.check()?;
     ensure!(!planned.updates.is_empty(), "the edit changes nothing");
@@ -173,6 +174,7 @@ pub(crate) async fn run(
         host_name,
         &send,
         control,
+        link,
         |ready, signature| journal.start_metadata_batch(id, ready, signature),
     )
     .await
@@ -459,6 +461,8 @@ pub(crate) async fn set(
         return Ok(SetOutcome::Cancelled);
     }
     let mut journal = resolved.writable(&identity)?;
+    let mut link =
+        crate::engine::execution::link::RunLink::new(directory.join("edit").join("link"));
     let (mut before, mut planned, mut attempt) = (before, planned, 1);
     let settled = loop {
         let result = run(
@@ -469,6 +473,7 @@ pub(crate) async fn set(
             None,
             o.host_name,
             &control,
+            &mut link,
         )
         .await;
         match result {
@@ -742,6 +747,7 @@ pub(crate) async fn update_all(
     directory: &Path,
     host_name: &str,
     control: impl Fn() -> Control,
+    link: &mut crate::engine::execution::link::RunLink,
     mut progress: impl FnMut(usize, usize) -> Result<()>,
 ) -> Result<usize> {
     let _phase = crate::engine::phase::start(crate::engine::phase::Phase::UpdateMetadata);
@@ -796,6 +802,7 @@ pub(crate) async fn update_all(
             coordination,
             host_name,
             &control,
+            link,
         )
         .await
         {
