@@ -2165,9 +2165,19 @@ fn parse_artwork(
         if row.get_ref("entity_type")? == ValueRef::Integer(0) {
             let entity = integer(row, "entity_pid")?;
             if !unsynced_items.contains(&entity) && !tracks.is_empty() {
-                let sync_id = *track_ids
-                    .get(&entity)
-                    .context("track artwork registration join absent")?;
+                let Some(&sync_id) = track_ids.get(&entity) else {
+                    // Music deleted on the phone keeps its source300 track
+                    // cover rows; a new track that reuses the item pid
+                    // replaces the row. Its cache ID stays occupied, but it
+                    // names no music. Any other missing join still fails.
+                    let deleted_cover = entity > 0
+                        && canonical_id.is_some()
+                        && integer(row, "artwork_type")? == 1
+                        && integer(row, "artwork_variant_type")? == 0;
+                    ensure!(deleted_cover, "track artwork registration join absent");
+                    inventory.unmapped_source300_token_rows += 1;
+                    continue;
+                };
                 inventory.tracks_with_artwork_registration.insert(sync_id);
             }
         }

@@ -1265,6 +1265,35 @@ fn emptied_music_library_preserves_stale_source300_ids_without_treating_them_as_
 }
 
 #[test]
+fn deleted_tracks_artwork_registrations_survive_new_music_without_registering_covers() {
+    // Observed on iOS 27.2: music deleted on the phone keeps its source300
+    // registrations, and new tracks inserted afterwards leave the rows whose
+    // item pids they do not reuse.
+    let fixture = Fixture::new(false);
+    let before = fixture.read(false).unwrap();
+    assert!(!before.tracks().is_empty());
+    fixture
+        .connection
+        .execute_batch(
+            "INSERT INTO artwork_token VALUES(999,'677',300,1,0,0);
+             INSERT INTO artwork_token VALUES(998,'0',300,1,0,0);",
+        )
+        .unwrap();
+    let catalog = fixture.read(false).unwrap();
+    let (was, art) = (before.artwork(), catalog.artwork());
+    assert_eq!(art.track_cache_ids(), was.track_cache_ids());
+    assert_eq!(
+        art.tracks_with_artwork_registration(),
+        was.tracks_with_artwork_registration()
+    );
+    assert!(art.occupied_cache_ids().contains(&677));
+    assert_eq!(
+        art.unmapped_source300_token_rows(),
+        was.unmapped_source300_token_rows() + 2
+    );
+}
+
+#[test]
 fn zero_artwork_sentinel_survives_music_insertion_without_registering_covers() {
     // A just-cleared phone can keep source300 token "0" when a new track is
     // inserted. It is neither a valid cached-art ID nor artwork for the track
@@ -1374,7 +1403,11 @@ fn duplicate_known_artwork_relationships_and_missing_joins_fail() {
         "INSERT INTO artwork_token VALUES(1,'677',300,1,0,0),(1,'678',300,1,0,0)",
         "INSERT INTO artwork_token VALUES(31,'677',300,6,4,0),(31,'677',300,6,4,0)",
         "INSERT INTO artwork_token VALUES(31,'677',300,6,4,0),(31,'678',300,6,4,0)",
-        "INSERT INTO artwork_token VALUES(999,'677',300,1,0,0)",
+        // A missing positive track pid is a deleted track's cover; see
+        // deleted_tracks_artwork_registrations_survive_new_music_*.
+        "INSERT INTO artwork_token VALUES(999,'677',300,2,0,0)",
+        "INSERT INTO artwork_token VALUES(999,'677',300,1,0,1)",
+        "INSERT INTO artwork_token VALUES(999,'opaque',500,1,0,0)",
         "INSERT INTO artwork_token VALUES(0,'677',300,1,0,0)",
         "INSERT INTO artwork_token VALUES(NULL,'677',300,1,0,0)",
         "INSERT INTO artwork_token VALUES(1,'677',300,'unknown',0,0)",
