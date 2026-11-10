@@ -290,7 +290,7 @@ async fn pending_demand_control_retains_consumed_partial_and_rejected_complete_f
                 }),
                 "offline-only",
             ),
-            MAX_BYTES,
+            Arc::new(AtomicUsize::new(MAX_BYTES)),
         )
         .await
         .unwrap();
