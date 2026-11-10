@@ -421,3 +421,65 @@ fn a_cache_whose_table_has_another_definition_is_set_aside() {
     drop(cache_database::open(&cache, &SCHEMA).unwrap());
     assert!(cache.join("sources.sqlite.unreadable").exists());
 }
+
+/// An ALAC copy of the fixture with a JPEG cover.
+fn covered_alac(dir: &Path) -> PathBuf {
+    use lofty::{
+        config::{ParseOptions, WriteOptions},
+        file::AudioFile,
+        mp4::Mp4File,
+        picture::{MimeType, Picture, PictureType},
+    };
+    let path = alac(dir);
+    let mut file = std::io::Cursor::new(std::fs::read(&path).unwrap());
+    let mut mp4 = Mp4File::read_from(&mut file, ParseOptions::default()).unwrap();
+    mp4.ilst_mut()
+        .unwrap()
+        .insert_picture(Picture::new_unchecked(
+            PictureType::CoverFront,
+            Some(MimeType::Jpeg),
+            None,
+            vec![0xff, 0xd8, 0xff, 0xd9],
+        ));
+    mp4.save_to(&mut file, WriteOptions::default()).unwrap();
+    let covered = dir.join("covered.m4a");
+    std::fs::write(&covered, file.into_inner()).unwrap();
+    covered
+}
+
+#[test]
+fn planning_keeps_cover_facts_as_a_fresh_read_has_them() {
+    let dir = Temp::new("facts");
+    let paths = [covered_alac(&dir.0), alac(&dir.0)];
+    let cache = dir.0.join("cache");
+    let facts = |a: &artwork::SourceArtwork| {
+        (
+            a.source_size,
+            a.source_sha256,
+            a.cover
+                .as_ref()
+                .map(|c| (c.bytes.len() as u64, c.sha256, c.checksum)),
+            a.embedded.as_ref().map(|e| (e.format, e.sha256)),
+            a.left_out.clone(),
+        )
+    };
+    let kept = |k: &ArtworkFacts| {
+        (
+            k.source_size,
+            k.source_sha256,
+            k.cover.as_ref().map(|c| (c.size, c.sha256, c.checksum)),
+            k.embedded.as_ref().map(|e| (e.format, e.sha256)),
+            k.left_out.clone(),
+        )
+    };
+    for _ in ["first run, read", "later run, from sources.sqlite"] {
+        as_a_new_run(cache.clone(), &dir.0);
+        for path in &paths {
+            let fresh = artwork::read(path).unwrap();
+            assert_eq!(kept(&artwork(path).unwrap()), facts(&fresh));
+            // From this process's memory too.
+            assert_eq!(kept(&artwork(path).unwrap()), facts(&fresh));
+        }
+    }
+    assert!(artwork::read(&paths[0]).unwrap().cover.is_some());
+}

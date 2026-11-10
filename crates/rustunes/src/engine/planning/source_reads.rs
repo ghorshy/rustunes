@@ -9,7 +9,8 @@
 //!
 //! Across runs, reads live in `sources.sqlite`, never in a journal, and the
 //! device is not compared: it changes at every mount on btrfs. A cover is
-//! kept once by its SHA-256 and checked against it when used. A row older than
+//! kept once by its SHA-256 and checked against it when used. In memory only
+//! a cover's facts are kept ([`ArtworkFacts`]), never its bytes. A row older than
 //! [`KEEP_DAYS`] is dropped, so an unchanged file is read once more after that.
 //! Rows outlive a change to how a build defines the ALAC fingerprint's
 //! composite, on purpose: it is computed again from the stored fields, so such a
@@ -82,7 +83,7 @@ impl Key {
 }
 
 static FINGERPRINTS: Mutex<Option<HashMap<Key, fingerprint::SourceFingerprint>>> = Mutex::new(None);
-static ARTWORK: Mutex<Option<HashMap<Key, artwork::SourceArtwork>>> = Mutex::new(None);
+static ARTWORK: Mutex<Option<HashMap<Key, ArtworkFacts>>> = Mutex::new(None);
 static MPEG: Mutex<Option<HashMap<Key, mpeg::Source>>> = Mutex::new(None);
 static DISK: OnceLock<Disk> = OnceLock::new();
 
@@ -95,12 +96,13 @@ fn kept<T: Clone + Persisted>(
         store,
         path,
         |key| disk().and_then(|disk| disk.load::<T>(key)),
+        read,
         |key, value| {
             if let Some(disk) = disk() {
                 disk.store(key, value);
             }
         },
-        read,
+        T::clone,
     )
 }
 
@@ -128,16 +130,21 @@ pub(crate) fn as_a_new_run(directory: PathBuf, under: &Path) {
     if let Some(store) = MPEG.lock().unwrap().as_mut() {
         store.retain(|key, _| !key.path.starts_with(under));
     }
+    if let Some(store) = ARTWORK.lock().unwrap().as_mut() {
+        store.retain(|key, _| !key.path.starts_with(under));
+    }
 }
 
-/// `read` of `path`, unless `store` or `load` has it for the file's current
-/// stat; a read during which the stat stayed is kept, and passed to `save`.
-fn remembered<T: Clone>(
+/// What `keep` takes of `read` of `path`, unless `store` or `load` has it for
+/// the file's current stat; a read during which the stat stayed is passed to
+/// `save` and kept.
+fn remembered<T: Clone, R>(
     store: &Mutex<Option<HashMap<Key, T>>>,
     path: &Path,
     load: impl FnOnce(&Key) -> Option<T>,
-    save: impl FnOnce(&Key, &T),
-    read: impl FnOnce(&Path) -> Result<T>,
+    read: impl FnOnce(&Path) -> Result<R>,
+    save: impl FnOnce(&Key, &R),
+    keep: impl FnOnce(&R) -> T,
 ) -> Result<T> {
     let before = key(path);
     if let Some(before) = &before {
@@ -157,11 +164,12 @@ fn remembered<T: Clone>(
             return Ok(value);
         }
     }
-    let value = read(path)?;
+    let fresh = read(path)?;
+    let value = keep(&fresh);
     if let Some(before) = before
         && key(path).as_ref() == Some(&before)
     {
-        save(&before, &value);
+        save(&before, &fresh);
         if let Ok(mut store) = store.lock() {
             store.get_or_insert_default().insert(before, value.clone());
         }
@@ -174,9 +182,61 @@ pub(crate) fn fingerprint(path: &Path) -> Result<fingerprint::SourceFingerprint>
     kept(&FINGERPRINTS, path, fingerprint::read)
 }
 
-/// `artwork::read`, unless this file was read unchanged before.
-pub(crate) fn artwork(path: &Path) -> Result<artwork::SourceArtwork> {
-    kept(&ARTWORK, path, artwork::read)
+/// The facts of `artwork::read`, unless this file was read unchanged before.
+pub(crate) fn artwork(path: &Path) -> Result<ArtworkFacts> {
+    remembered(
+        &ARTWORK,
+        path,
+        |key| {
+            disk()
+                .and_then(|disk| disk.load::<artwork::SourceArtwork>(key))
+                .map(|art| ArtworkFacts::of(&art))
+        },
+        artwork::read,
+        |key, art| {
+            if let Some(disk) = disk() {
+                disk.store(key, art);
+            }
+        },
+        ArtworkFacts::of,
+    )
+}
+
+/// What planning needs of a source's artwork: its cover's identity, never
+/// its bytes, so a library's covers are not held in memory. Sending reads
+/// the cover from the file.
+#[derive(Clone)]
+pub(crate) struct ArtworkFacts {
+    pub source_size: u64,
+    pub source_sha256: [u8; 32],
+    pub cover: Option<CoverFacts>,
+    pub embedded: Option<artwork::EmbeddedImage>,
+    pub left_out: Option<String>,
+}
+
+/// A cover's size and identity.
+#[derive(Clone)]
+pub(crate) struct CoverFacts {
+    pub size: u64,
+    pub sha256: [u8; 32],
+    /// The MP4 checksum the phone's catalogue records for it.
+    pub checksum: u32,
+}
+
+impl ArtworkFacts {
+    fn of(art: &artwork::SourceArtwork) -> Self {
+        Self {
+            source_size: art.source_size,
+            source_sha256: art.source_sha256,
+            cover: art.cover.as_ref().map(|cover| CoverFacts {
+                size: cover.bytes.len() as u64,
+                sha256: cover.sha256,
+                checksum: cover.checksum,
+            }),
+            embedded: art.embedded.clone(),
+            left_out: art.left_out.clone(),
+        }
+    }
 }
 
 /// `mpeg::read` (MP3, AAC, FLAC, WAV), unless this file was read unchanged
