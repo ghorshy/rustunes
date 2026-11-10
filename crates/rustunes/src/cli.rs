@@ -1,3 +1,4 @@
+mod artwork_probe;
 mod bar;
 mod cache_view;
 mod change_plan;
@@ -526,6 +527,21 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Hidden one-off experiment: send zero artwork fields for existing tracks.
+    #[command(name = "probe-clear-artwork", hide = true)]
+    ProbeClearArtwork {
+        /// Track sync IDs (hex); every one is cleared in the same session.
+        #[arg(long = "track", value_name = "SYNC_ID", required = true)]
+        tracks: Vec<String>,
+        /// Also send artwork_cache_id 0, not only artwork_checksum 0.
+        #[arg(long)]
+        clear_cache_id: bool,
+        #[arg(long, default_value = "rustunes")]
+        host_name: String,
+        /// Maximum seconds for the captures and the session.
+        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=1800))]
+        seconds: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -897,6 +913,7 @@ fn reaches_phone(command: &Command) -> bool {
             | Command::DeviceInfo
             | Command::Probe { .. }
             | Command::Syslog { .. }
+            | Command::ProbeClearArtwork { .. }
     )
 }
 
@@ -1721,6 +1738,26 @@ async fn dispatch(cli: Cli, engine: &engine::Engine) -> Result<ExitCode> {
         Command::Syslog { seconds, output } => {
             let provider = connected_provider().await?;
             syslog(&provider, Duration::from_secs(seconds), output).await?;
+        }
+        Command::ProbeClearArtwork {
+            tracks,
+            clear_cache_id,
+            host_name,
+            seconds,
+        } => {
+            let state = default_state_directory()?;
+            engine
+                .scope(artwork_probe::run(
+                    artwork_probe::Request {
+                        tracks,
+                        clear_cache_id,
+                        state,
+                        host_name,
+                        seconds,
+                    },
+                    engine,
+                ))
+                .await?;
         }
     }
     Ok(ExitCode::SUCCESS)
