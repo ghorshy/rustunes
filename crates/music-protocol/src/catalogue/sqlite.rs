@@ -549,9 +549,7 @@ enum SnapshotStorage {
 impl SnapshotStorage {
     fn input_limits(self) -> (u64, u64) {
         match self {
-            Self::Current | Self::Legacy | Self::MemoryTemp => {
-                (MAX_DATABASE_BYTES, MAX_WAL_BYTES)
-            }
+            Self::Current | Self::Legacy | Self::MemoryTemp => (MAX_DATABASE_BYTES, MAX_WAL_BYTES),
         }
     }
     fn memory_temp(self) -> bool {

@@ -1255,10 +1255,7 @@ fn emptied_music_library_preserves_stale_source300_ids_without_treating_them_as_
     let catalog = fixture.read(false).unwrap();
     assert!(catalog.tracks().is_empty());
     let art = catalog.artwork();
-    assert_eq!(
-        art.occupied_cache_ids(),
-        &BTreeSet::from([677, 678])
-    );
+    assert_eq!(art.occupied_cache_ids(), &BTreeSet::from([677, 678]));
     assert_eq!(art.cached_ids(), &BTreeSet::from([678]));
     assert!(art.track_cache_ids().is_empty());
     assert!(art.tracks_with_artwork_registration().is_empty());
@@ -1273,11 +1270,14 @@ fn zero_artwork_sentinel_survives_music_insertion_without_registering_covers() {
     // inserted. It is neither a valid cached-art ID nor artwork for the track
     // or album, even if its entity and artwork shape resemble real covers.
     let fixture = Fixture::new(false);
-    fixture.connection.execute_batch(
-        "INSERT INTO artwork VALUES('0',300,6,0,NULL);
+    fixture
+        .connection
+        .execute_batch(
+            "INSERT INTO artwork VALUES('0',300,6,0,NULL);
          INSERT INTO artwork_token VALUES(1,'0',300,1,0,0);
-         INSERT INTO artwork_token VALUES(31,'0',300,6,4,0);"
-    ).unwrap();
+         INSERT INTO artwork_token VALUES(31,'0',300,6,4,0);",
+        )
+        .unwrap();
     let catalog = fixture.read(false).unwrap();
     assert_eq!(catalog.tracks().len(), 1);
     let art = catalog.artwork();
@@ -1295,21 +1295,33 @@ fn zero_artwork_sentinel_survives_music_insertion_without_registering_covers() {
 #[test]
 fn zero_artwork_sentinel_does_not_mask_real_or_invalid_live_track_artwork() {
     let fixture = Fixture::new(false);
-    fixture.connection.execute_batch(
-        "INSERT INTO artwork_token VALUES(1,'0',300,1,0,0);
-         INSERT INTO artwork_token VALUES(1,'677',300,1,0,0);"
-    ).unwrap();
+    fixture
+        .connection
+        .execute_batch(
+            "INSERT INTO artwork_token VALUES(1,'0',300,1,0,0);
+         INSERT INTO artwork_token VALUES(1,'677',300,1,0,0);",
+        )
+        .unwrap();
     let art = fixture.read(false).unwrap();
     let art = art.artwork();
     assert_eq!(art.occupied_cache_ids(), &BTreeSet::from([677]));
     assert_eq!(art.track_cache_ids(), &BTreeMap::from([(u64::MAX, 677)]));
-    assert_eq!(art.tracks_with_artwork_registration(), &BTreeSet::from([u64::MAX]));
+    assert_eq!(
+        art.tracks_with_artwork_registration(),
+        &BTreeSet::from([u64::MAX])
+    );
     let fixture = Fixture::new(false);
-    fixture.connection.execute_batch(
-        "INSERT INTO artwork_token VALUES(1,'0',300,1,0,0);
-         INSERT INTO artwork_token VALUES(1,'000',300,1,0,0);"
-    ).unwrap();
-    assert!(fixture.read(false).is_err(), "only exact zero may be a live-library placeholder");
+    fixture
+        .connection
+        .execute_batch(
+            "INSERT INTO artwork_token VALUES(1,'0',300,1,0,0);
+         INSERT INTO artwork_token VALUES(1,'000',300,1,0,0);",
+        )
+        .unwrap();
+    assert!(
+        fixture.read(false).is_err(),
+        "only exact zero may be a live-library placeholder"
+    );
 }
 
 #[test]
@@ -1323,7 +1335,7 @@ fn empty_music_library_still_refuses_nonnumeric_source300_artwork_tokens() {
              DELETE FROM item_store;
              DELETE FROM item_extra;
              DELETE FROM item;
-             INSERT INTO artwork_token VALUES(1,'not-a-number',300,1,0,0);"
+             INSERT INTO artwork_token VALUES(1,'not-a-number',300,1,0,0);",
         )
         .unwrap();
     assert!(fixture.read(false).is_err());

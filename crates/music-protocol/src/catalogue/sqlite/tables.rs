@@ -803,10 +803,12 @@ mod row_budget_tests {
     #[test]
     fn aggregate_row_and_cell_limits_still_refuse_oversized_catalogues() {
         let rows = ensure_row_cell_budget("items", 100, 200_001, 500_000)
-            .unwrap_err().to_string();
+            .unwrap_err()
+            .to_string();
         assert!(rows.contains("items") && rows.contains("200001/200000"));
         let cells = ensure_row_cell_budget("tokens", 100, 100_000, 2_000_001)
-            .unwrap_err().to_string();
+            .unwrap_err()
+            .to_string();
         assert!(cells.contains("tokens") && cells.contains("2000001/2000000"));
     }
 }
