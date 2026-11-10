@@ -4,9 +4,9 @@
 //! the phone itself advertises (Lockdown `com.apple.mobile.iTunes`,
 //! `AudioCodecs`).
 use anyhow::{Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Format {
     Mpeg1Layer3,
@@ -25,7 +25,7 @@ pub enum Format {
     Aiff,
 }
 
-const ALL: [Format; 11] = [
+pub(crate) const ALL: [Format; 11] = [
     Format::Mpeg1Layer3,
     Format::Mpeg2Layer3,
     Format::Mpeg25Layer3,

@@ -2,7 +2,7 @@
 //! The complete bounded frame scan is hash-bound to EncodedMpeg1Layer3. Fractions
 //! retain sample counts/rate exactly; no rounded duration enters identity.
 use anyhow::{Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -13,23 +13,27 @@ const MAX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FRAMES: u32 = 2_000_000;
 const SAMPLES: u64 = 1152;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// [`TimingEvidence::schema`].
+pub(crate) const SCHEMA: super::Name = "music-protocol.mpeg-source-timing";
+/// The encoders whose Xing/Info tag [`EncoderTag`] reads.
+pub(crate) const ENCODER_FAMILIES: [super::Name; 3] = ["LAME", "Lavf", "Lavc"];
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SampleDuration {
     pub samples: u64,
     pub sample_rate: u32,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BitrateCount {
     pub kbps: u16,
     pub frames: u32,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BitrateMode {
     Constant,
     Variable,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameSummary {
     pub frame_count: u32,
     pub coded_duration: SampleDuration,
@@ -39,9 +43,10 @@ pub struct FrameSummary {
     pub channel_mode_counts: [u32; 4],
     pub crc_protected_frames: u32,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimingEvidence {
-    pub schema: &'static str,
+    #[serde(deserialize_with = "super::stored::timing_schema")]
+    pub schema: super::Name,
     pub frame_bytes_sha256: String,
     pub physical: FrameSummary,
     /// Only Xing/Info explicitly establishes a separate leading metadata frame.
@@ -52,14 +57,14 @@ pub struct TimingEvidence {
     pub header: Option<SeekHeader>,
     pub native_timing_qualified: bool,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SeekHeader {
     Xing(XingInfo),
     Info(XingInfo),
     Vbri(Vbri),
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XingInfo {
     pub frame_offset: u16,
     pub flags: u32,
@@ -71,9 +76,10 @@ pub struct XingInfo {
     pub quality: Option<u32>,
     pub encoder: Option<EncoderTag>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncoderTag {
-    pub family: &'static str,
+    #[serde(deserialize_with = "super::stored::encoder_family")]
+    pub family: super::Name,
     pub identifier_hex: String,
     pub revision: u8,
     pub method: u8,
@@ -84,13 +90,13 @@ pub struct EncoderTag {
     pub raw_tag_sha256: String,
     pub crc_verified: bool,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VbriCountBasis {
     PhysicalFrames,
     ExcludingFirstFrame,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vbri {
     pub frame_offset: u16,
     pub version: u16,
@@ -245,7 +251,7 @@ pub(super) fn inspect<R: Read + Seek>(reader: &mut R, span: FrameSpan) -> Result
         );
     }
     Ok(TimingEvidence {
-        schema: "music-protocol.mpeg-source-timing",
+        schema: SCHEMA,
         frame_bytes_sha256: super::hex(&actual),
         physical: all.summary(span.sample_rate),
         excluding_xing_info_frame: has_xing.then(|| rest.summary(span.sample_rate)),
@@ -341,12 +347,9 @@ fn parse_xing(b: &[u8], at: usize, span: &FrameSpan) -> Result<XingInfo> {
         None
     };
     let quality = if flags & 8 != 0 { Some(r.u32()?) } else { None };
-    let family = match b.get(r.at..r.at + 4) {
-        Some(b"LAME") => Some("LAME"),
-        Some(b"Lavf") => Some("Lavf"),
-        Some(b"Lavc") => Some("Lavc"),
-        _ => None,
-    };
+    let family = ENCODER_FAMILIES
+        .into_iter()
+        .find(|family| b.get(r.at..r.at + 4) == Some(family.as_bytes()));
     let encoder = if let Some(family) = family {
         let tag = r.take(36)?;
         let revision = tag[9] >> 4;

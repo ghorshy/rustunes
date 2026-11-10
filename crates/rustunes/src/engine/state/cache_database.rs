@@ -1,9 +1,11 @@
 //! Private SQLite databases that hold caches, never journals. Each is created
 //! 0600 in a 0700 directory, commits in WAL mode with NORMAL sync (a crash may
 //! lose the last entries, never mix them), and is recognised by its
-//! application id and exactly its tables. A damaged or unfamiliar database is
-//! set aside as `.unreadable` and rebuilt; any other failure, such as a lock
-//! held past the timeout, is returned.
+//! application id and exactly its tables. An earlier build's database, with
+//! the same application id and only tables this build defines exactly so,
+//! gets the tables it lacks and keeps its rows. A damaged or unfamiliar
+//! database is set aside as `.unreadable` and rebuilt; any other failure,
+//! such as a lock held past the timeout, is returned.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
 use std::{
@@ -110,11 +112,21 @@ fn create(c: &mut Connection, schema: &Schema) -> Result<()> {
     if familiar(&tx, schema)? {
         return Ok(());
     }
-    if application_id(&tx)? != 0 || !objects(&tx)?.is_empty() {
+    let (id, existing) = (application_id(&tx)?, objects(&tx)?);
+    let empty = id == 0 && existing.is_empty();
+    // An earlier build's database: each of its tables is one of these, as
+    // it is, so only the newer tables are added and its rows stay.
+    let older = id == schema.application_id
+        && existing
+            .iter()
+            .all(|sql| schema.tables.iter().any(|(_, table)| table == sql));
+    if !empty && !older {
         return Err(Unfamiliar(schema.label).into());
     }
     for (_, sql) in schema.tables {
-        tx.execute_batch(sql)?;
+        if !existing.iter().any(|table| table == sql) {
+            tx.execute_batch(sql)?;
+        }
     }
     tx.execute_batch(&format!("PRAGMA application_id={};", schema.application_id))?;
     tx.commit()?;
