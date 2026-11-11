@@ -131,14 +131,26 @@ impl Audio {
             Self::Mpeg(source) => source.expected(),
         }
     }
-    /// Hold the file: the operation binds these exact bytes.
+    /// Hold the file's identity: the upload hashes the bytes it sends.
     fn open(&self, path: &Path) -> Result<BoundSource> {
         match self {
-            Self::Alac { fingerprint, .. } => BoundSource::open(path, fingerprint),
+            Self::Alac { fingerprint, .. } => BoundSource::open_for_transfer(path, fingerprint),
             Self::Mpeg(source) => {
                 let identity = source.identity();
-                BoundSource::open_observed(path, identity.file_bytes, identity.full_file_sha256)
+                BoundSource::open_observed_for_transfer(
+                    path,
+                    identity.file_bytes,
+                    identity.full_file_sha256,
+                )
             }
+        }
+    }
+    /// A source unchanged since planning is known by its stat; only one that
+    /// changed is read again, here, before any upload.
+    fn require_unchanged(&self, path: &Path) -> Result<()> {
+        match self {
+            Self::Alac { fingerprint, .. } => source_reads::require_fingerprint(path, fingerprint),
+            Self::Mpeg(source) => source_reads::require_mpeg(path, source.source()),
         }
     }
     /// Read `path` again as the source a batch target recorded.
@@ -193,6 +205,17 @@ impl Member {
         self.conversion
             .as_ref()
             .map_or_else(|| self.source.clone(), |c| c.source_path.clone())
+    }
+    /// Pin the source for its upload. One whose stat is unchanged since
+    /// planning is known by that stat and proved by the upload's own digest,
+    /// in the same pass; one that changed is read and refused here, before any
+    /// connection. A converted source was written by this run, so it needs no
+    /// such check.
+    fn hold(&self) -> Result<BoundSource> {
+        if self.conversion.is_none() {
+            self.audio.require_unchanged(&self.source)?;
+        }
+        self.audio.open(&self.source)
     }
 }
 
@@ -370,8 +393,8 @@ pub(crate) fn members(
                     .mp3_tracks
                     .iter()
                     .find(|s| s.relative_path == row.relative_path);
-                // Keep only what planning recorded. The batch reads the
-                // source again and checks these digests before sending it.
+                // Keep only what planning recorded. The upload hashes the
+                // bytes it sends and checks them against these digests.
                 let (audio, has_cover, cover_sha256) = match (alac, mpeg) {
                     (Some(source), _) if batch_size > 1 => {
                         let art = source_reads::artwork(&path)?;
@@ -627,7 +650,8 @@ pub(crate) async fn run(
             removal_batch::targets(before, journal, removals)?
         }
     };
-    // Hold every source before planning: the operation binds these bytes.
+    // Hold every source before planning: a changed one is refused here, an
+    // unchanged one is proved by its upload's digest.
     let mut held = hold(members)?;
     let imported_at =
         UNIX_EPOCH + Duration::from_secs(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
@@ -819,9 +843,9 @@ pub(crate) async fn run(
     }
 }
 
-/// Hold every member's source: the operation binds these bytes.
+/// Hold every member's source for its upload: a changed one is refused here.
 pub(crate) fn hold(members: &[Member]) -> Result<Vec<BoundSource>> {
-    members.iter().map(|m| m.audio.open(&m.source)).collect()
+    members.iter().map(Member::hold).collect()
 }
 
 /// A session's offline checks against the exact `before` state, kept for its

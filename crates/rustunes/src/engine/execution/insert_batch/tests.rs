@@ -35,8 +35,14 @@ fn cover(bytes: &[u8]) -> Cover {
     }
 }
 
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
+        .join(name)
+}
+
 fn member(name: &str, album: u64, cover: Option<Cover>, keep_album_image: bool) -> Member {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tone-alac.m4a");
+    let source = fixture("tone-alac.m4a");
     Member {
         relative_path: name.into(),
         audio: Audio::Alac {
@@ -304,6 +310,45 @@ fn a_batch_reads_a_cover_only_when_it_carries_it() {
         member.cover.is_none(),
         "a cover the cover step sends is not read with its batch"
     );
+}
+
+#[test]
+fn a_batch_refuses_a_source_that_changed_after_planning() {
+    let temp = Temp::new("hold-changed");
+    let source = temp.0.join("track.m4a");
+    std::fs::copy(fixture("tone-alac.m4a"), &source).unwrap();
+    let mut track = member("track", 1, None, false);
+    track.source = source.clone();
+    track.audio = Audio::Alac {
+        fingerprint: music_protocol::media::fingerprint::read(&source).unwrap(),
+        metadata: metadata::read(&source).unwrap(),
+    };
+    let mut bytes = std::fs::read(&source).unwrap();
+    bytes[20] ^= 1;
+    std::fs::write(&source, bytes).unwrap();
+    let Err(error) = hold(&[track]) else {
+        panic!("a source changed after planning must not be held");
+    };
+    assert!(format!("{error:#}").contains("changed after planning"));
+}
+
+#[test]
+fn a_batch_refuses_an_mpeg_source_that_changed_after_planning() {
+    let temp = Temp::new("hold-changed-mp3");
+    let source = temp.0.join("track.mp3");
+    std::fs::copy(fixture("tone-mp3-vbr.mp3"), &source).unwrap();
+    let planned = music_protocol::media::mpeg::read(&source).unwrap();
+    let prepared = PreparedSource::read_expected(&source, &planned).unwrap();
+    let mut track = member("track", 1, None, false);
+    track.source = source.clone();
+    track.audio = Audio::Mpeg(Arc::new(prepared));
+    let mut bytes = std::fs::read(&source).unwrap();
+    bytes[100] ^= 1;
+    std::fs::write(&source, bytes).unwrap();
+    let Err(error) = hold(&[track]) else {
+        panic!("a source changed after planning must not be held");
+    };
+    assert!(format!("{error:#}").contains("changed after planning"));
 }
 
 #[tokio::test]
