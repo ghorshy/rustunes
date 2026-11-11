@@ -225,7 +225,11 @@ where
         insertion.state.device_identifier(),
         insertion.state.library_identity(),
     )?)?;
-    let mut source = BoundSource::open(insertion.source, &prepared.content.source.require_alac()?)?;
+    let expected = prepared.content.source.require_alac()?;
+    // An unchanged source is proved by its upload's digest; a changed one is
+    // read and refused here, before any connection.
+    crate::engine::planning::source_reads::require_fingerprint(insertion.source, &expected)?;
+    let mut source = BoundSource::open_for_transfer(insertion.source, &expected)?;
     let asset_id = (prepared.content.track_pid as i64).to_string();
     let state = insertion.state;
     let catalog_policy = state.ancillary().audio(&asset_id)?;

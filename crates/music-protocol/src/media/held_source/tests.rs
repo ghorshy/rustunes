@@ -112,6 +112,24 @@ fn source_replaced_between_stat_and_open_cannot_block_on_fifo_or_follow_symlink(
 }
 
 #[test]
+fn a_transfer_pin_does_not_read_content_that_the_upload_proves() {
+    let temp = Temp::new();
+    let path = temp.source();
+    let fingerprint = crate::media::fingerprint::read(&path).unwrap();
+    // The upload hashes the bytes it sends, so a transfer pin checks only the
+    // file's identity: a stale digest still pins, while a verified open refuses.
+    let mut stale = fingerprint.clone();
+    stale.full_file_sha256[0] ^= 1;
+    let source = BoundSource::open_for_transfer(&path, &stale).unwrap();
+    assert!(BoundSource::open(&path, &stale).is_err());
+    // The pin still binds the path and metadata for the transfer.
+    let mut data = fs::read(&path).unwrap();
+    data[20] ^= 1;
+    fs::write(&path, &data).unwrap();
+    assert!(source.check().is_err());
+}
+
+#[test]
 fn source_validation_returns_the_same_rewound_handle() {
     let temp = Temp::new();
     let path = temp.source();

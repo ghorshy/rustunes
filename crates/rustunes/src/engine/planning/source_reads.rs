@@ -4,8 +4,9 @@
 //! apart, and the next run reads them again; each read hashes the whole file.
 //! A file whose path, device, inode, size, mtime or ctime changed is read
 //! again, and a read during which any of them changed is not kept. Every
-//! other format's read ([`mpeg`]) is kept the same way. Uploads,
-//! pre-send checks and recovery read the bytes themselves.
+//! other format's read ([`mpeg`]) is kept the same way. Uploads and recovery
+//! read the bytes themselves; a pre-send check uses the kept read when the
+//! stat is unchanged, and reads again only when it changed.
 //!
 //! Across runs, reads live in `sources.sqlite`, never in a journal, and the
 //! device is not compared: it changes at every mount on btrfs. A cover is
@@ -18,7 +19,7 @@
 //! Cache trouble never fails planning: a failed lookup is a miss, and a failed
 //! write is reported once and skipped.
 use crate::engine::state::cache_database;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use music_protocol::media::artwork;
 use music_protocol::media::fingerprint;
 use music_protocol::media::mpeg;
@@ -64,7 +65,7 @@ impl Key {
     /// with a device number miss once and are replaced. An unchanged path,
     /// inode, size, mtime and ctime still name the same file. Planning trusts
     /// that identity; a file sent from a wrong hit still fails the full-file
-    /// SHA-256 check before upload.
+    /// SHA-256 check of its upload.
     fn stat(&self) -> Vec<u8> {
         [
             0u64.to_be_bytes(),
@@ -243,6 +244,32 @@ impl ArtworkFacts {
 /// before.
 pub(crate) fn mpeg(path: &Path) -> Result<mpeg::Source> {
     kept(&MPEG, path, mpeg::read)
+}
+
+/// [`fingerprint`], refused when it differs from what planning recorded. An
+/// unchanged stat answers from the kept read without touching the file; a
+/// changed one is read again and compared.
+pub(crate) fn require_fingerprint(
+    path: &Path,
+    expected: &fingerprint::SourceFingerprint,
+) -> Result<()> {
+    require_unchanged(path, expected, fingerprint)
+}
+
+/// [`mpeg`], refused when it differs from what planning recorded.
+pub(crate) fn require_mpeg(path: &Path, expected: &mpeg::Source) -> Result<()> {
+    require_unchanged(path, expected, mpeg)
+}
+
+fn require_unchanged<T: PartialEq>(
+    path: &Path,
+    expected: &T,
+    read: impl FnOnce(&Path) -> Result<T>,
+) -> Result<()> {
+    let changed = || format!("{} changed after planning", path.display());
+    let current = read(path).with_context(changed)?;
+    ensure!(current == *expected, "{}", changed());
+    Ok(())
 }
 
 /// Keep reads across runs in `directory`. Without `reuse` (full readback),

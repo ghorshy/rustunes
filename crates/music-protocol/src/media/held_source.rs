@@ -1,6 +1,8 @@
 //! Pin and verify exact local source bytes without granting execution authority.
 //! The descriptor, pathname and original metadata remain bound for the lifetime
-//! of the observation. This is independent of journals and operation permits.
+//! of the observation. A transfer may instead pin only that identity and let
+//! its own digest prove the content. This is independent of journals and
+//! operation permits.
 use crate::{media::fingerprint::SourceFingerprint, protocol::transfer::MAX_AUDIO};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
@@ -82,8 +84,24 @@ impl BoundSource {
     pub fn open(path: &Path, expected: &SourceFingerprint) -> Result<Self> {
         Self::open_observed(path, expected.file_bytes, expected.full_file_sha256)
     }
+    /// Pin the exact container an upload will send. The content is not verified
+    /// here: the caller must prove it, which an upload does by hashing the
+    /// bytes it sends.
+    pub fn open_for_transfer(path: &Path, expected: &SourceFingerprint) -> Result<Self> {
+        Self::open_observed_for_transfer(path, expected.file_bytes, expected.full_file_sha256)
+    }
     /// Pin an exact retained container without assigning an ALAC identity.
     pub fn open_observed(path: &Path, bytes: u64, sha256: [u8; 32]) -> Result<Self> {
+        let metadata = Self::observe(path, bytes, sha256)?;
+        Self::open_pinned(path, metadata, bytes, sha256)
+    }
+    /// Pin an observed container without verifying its content; the caller
+    /// must prove it, which a transfer does by hashing the bytes it sends.
+    pub fn open_observed_for_transfer(path: &Path, bytes: u64, sha256: [u8; 32]) -> Result<Self> {
+        let metadata = Self::observe(path, bytes, sha256)?;
+        Self::pin(path, metadata)
+    }
+    fn observe(path: &Path, bytes: u64, sha256: [u8; 32]) -> Result<fs::Metadata> {
         ensure!(
             bytes > 0 && sha256 != [0; 32],
             "missing observed file evidence"
@@ -93,14 +111,9 @@ impl BoundSource {
             metadata.is_file() && metadata.len() == bytes && metadata.len() <= MAX_AUDIO,
             "source type/size differs from preparation"
         );
-        Self::open_pinned(path, metadata, bytes, sha256)
+        Ok(metadata)
     }
-    fn open_pinned(
-        path: &Path,
-        metadata: fs::Metadata,
-        bytes: u64,
-        sha256: [u8; 32],
-    ) -> Result<Self> {
+    fn pin(path: &Path, metadata: fs::Metadata) -> Result<Self> {
         // The path may have changed since symlink_metadata. Do not follow a
         // replacement symlink or block opening a substituted FIFO before the
         // descriptor/path identity checks can reject it.
@@ -108,12 +121,21 @@ impl BoundSource {
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)?;
-        let mut source = Self {
+        let source = Self {
             file,
             metadata,
             path: path.to_owned(),
         };
         source.check()?;
+        Ok(source)
+    }
+    fn open_pinned(
+        path: &Path,
+        metadata: fs::Metadata,
+        bytes: u64,
+        sha256: [u8; 32],
+    ) -> Result<Self> {
+        let mut source = Self::pin(path, metadata)?;
         let mut digest = Sha256::new();
         let mut buffer = [0; 64 * 1024];
         let mut remaining = bytes;
