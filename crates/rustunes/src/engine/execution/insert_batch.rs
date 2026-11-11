@@ -38,6 +38,7 @@ use crate::{
     },
     engine::planning::collections::{CandidateIds, Planner},
     engine::planning::source_collection::mp3::preparation::PreparedSource,
+    engine::planning::source_reads,
     engine::recovery::retained::playback::{self, Window, between_runs},
     engine::state::audio_index::Absent,
     engine::state::current,
@@ -195,6 +196,132 @@ impl Member {
     }
 }
 
+/// One planned addition before its source is read for sending. It keeps only
+/// what planning recorded: the identities, the source path and its digests.
+/// A batch reads the source again into a [`Member`], so a run holds the covers
+/// and prepared sources of one batch, not of the whole library.
+#[derive(Clone)]
+pub(crate) struct MemberPlan {
+    /// Relative to the source root, for receipts and progress.
+    pub(crate) relative_path: String,
+    pub(crate) source: PathBuf,
+    pub(crate) track: u64,
+    pub(crate) album: u64,
+    pub(crate) artist: u64,
+    pub(crate) destination: String,
+    /// The source has a cover an insert batch would send.
+    pub(crate) has_cover: bool,
+    /// The cover rides with its audio. The caller clears it for a cover the
+    /// cover step sends instead.
+    pub(crate) carry_cover: bool,
+    /// The album was on the phone and must keep its image (add-only): the
+    /// cover rides only when the album's permanent original holds exactly
+    /// its bytes, read back after each batch's fresh capture.
+    pub(crate) keep_album_image: bool,
+    /// A FLAC `source` that goes as the ALAC converted from it.
+    pub(crate) convert: bool,
+    /// The SHA-256 of the cover as sent, so a conversion's cover can be
+    /// checked against it.
+    pub(crate) cover_sha256: Option<[u8; 32]>,
+    /// What planning read of the source; a batch checks it again.
+    audio: PlannedAudio,
+}
+
+/// A planned source read, without the cover bytes or a prepared source.
+#[derive(Clone)]
+enum PlannedAudio {
+    Alac {
+        fingerprint: SourceFingerprint,
+        metadata: Metadata,
+    },
+    Mpeg(music_protocol::media::mpeg::Source),
+}
+
+impl MemberPlan {
+    /// The source is ALAC, whose cover may wait for the cover step.
+    pub(crate) fn alac(&self) -> bool {
+        matches!(&self.audio, PlannedAudio::Alac { .. })
+    }
+
+    /// This batch sends the member's cover with its audio.
+    pub(crate) fn sends_cover(&self) -> bool {
+        self.carry_cover && self.has_cover
+    }
+
+    /// The source's size, for progress and conversion room.
+    fn bytes(&self) -> u64 {
+        match &self.audio {
+            PlannedAudio::Alac { fingerprint, .. } => fingerprint.file_bytes,
+            PlannedAudio::Mpeg(source) => source.fingerprint.file_bytes,
+        }
+    }
+
+    /// Read the source again and build the member this batch sends.
+    fn materialize(&self) -> Result<Member> {
+        let (audio, cover) = match &self.audio {
+            PlannedAudio::Alac {
+                fingerprint,
+                metadata,
+            } => {
+                let found = metadata::read(&self.source)?;
+                ensure!(
+                    found == *metadata,
+                    "{} changed after planning",
+                    self.relative_path
+                );
+                let (source_size, source_sha256, cover) = if self.sends_cover() {
+                    let art = artwork::read(&self.source)?;
+                    (art.source_size, art.source_sha256, art.cover)
+                } else {
+                    // The cover step sends this one: its facts are enough.
+                    let art = source_reads::artwork(&self.source)?;
+                    (art.source_size, art.source_sha256, None)
+                };
+                ensure!(
+                    source_size == fingerprint.file_bytes
+                        && source_sha256 == fingerprint.full_file_sha256,
+                    "{} changed after planning",
+                    self.relative_path
+                );
+                (
+                    Audio::Alac {
+                        fingerprint: fingerprint.clone(),
+                        metadata: found,
+                    },
+                    cover,
+                )
+            }
+            PlannedAudio::Mpeg(source) => {
+                let prepared = PreparedSource::read_expected(&self.source, source)
+                    .with_context(|| format!("{} changed after planning", self.relative_path))?;
+                prepared.ensure_batch_insertion_allowed()?;
+                let cover = if self.sends_cover() {
+                    crate::engine::planning::source_collection::mp3::artwork::batch_cover(
+                        &self.source,
+                        prepared.source(),
+                    )?
+                } else {
+                    None
+                };
+                (Audio::Mpeg(Arc::new(prepared)), cover)
+            }
+        };
+        Ok(Member {
+            relative_path: self.relative_path.clone(),
+            source: self.source.clone(),
+            audio,
+            track: self.track,
+            album: self.album,
+            artist: self.artist,
+            destination: self.destination.clone(),
+            cover,
+            keep_album_image: self.keep_album_image,
+            conversion: None,
+            convert: self.convert,
+        })
+    }
+}
+
 /// The new tracks of a saved plan that go in insert batches, in plan order,
 /// with the plan's collection scope and the number of other rows (audio
 /// replacements, new tracks the batches leave out, and conflicts), which the
@@ -203,7 +330,7 @@ impl Member {
 /// one-track session sends. A re-add that reuses a retired track's groups is
 /// an ordinary member: the batch reuses every existing group by its ID.
 pub(crate) struct Batchable {
-    pub(crate) members: Vec<Member>,
+    pub(crate) members: Vec<MemberPlan>,
     pub(crate) scope: [u8; 32],
     pub(crate) others: usize,
 }
@@ -243,61 +370,62 @@ pub(crate) fn members(
                     .mp3_tracks
                     .iter()
                     .find(|s| s.relative_path == row.relative_path);
-                // Read again from the same file; holding the source binds it
-                // to these bytes before anything is sent.
-                let (audio, cover) = match (alac, mpeg) {
+                // Keep only what planning recorded. The batch reads the
+                // source again and checks these digests before sending it.
+                let (audio, has_cover, cover_sha256) = match (alac, mpeg) {
                     (Some(source), _) if batch_size > 1 => {
-                        let metadata = metadata::read(&path)?;
-                        let art = artwork::read(&path)?;
-                        ensure!(
-                            metadata == source.metadata
-                                && art.source_size == source.fingerprint.file_bytes
-                                && art.source_sha256 == source.fingerprint.full_file_sha256,
-                            "{} changed after planning",
-                            source.relative_path
-                        );
-                        let fingerprint = source.fingerprint.clone();
+                        let art = source_reads::artwork(&path)?;
                         (
-                            Audio::Alac {
-                                fingerprint,
-                                metadata,
+                            PlannedAudio::Alac {
+                                fingerprint: source.fingerprint.clone(),
+                                metadata: source.metadata.clone(),
                             },
-                            art.cover,
+                            art.cover.is_some(),
+                            None,
                         )
                     }
                     (Some(_), _) if row.flac_to_alac => {
                         bail!("{} is not a FLAC to convert", row.relative_path)
                     }
                     (None, Some(source)) => {
-                        let prepared = PreparedSource::read_expected(&path, &source.source)
-                            .with_context(|| {
-                                format!("{} changed after planning", source.relative_path)
-                            })?;
-                        prepared.ensure_batch_insertion_allowed()?;
-                        let cover =
+                        let has_cover =
+                            music_protocol::media::mpeg::cover_picture(&source.source.artwork)
+                                .is_some();
+                        // A conversion's cover must match the one sent: read
+                        // it now and keep its digest only.
+                        let cover_sha256 = if row.flac_to_alac && has_cover {
                             crate::engine::planning::source_collection::mp3::artwork::batch_cover(
                                 &path,
-                                prepared.source(),
-                            )?;
-                        (Audio::Mpeg(Arc::new(prepared)), cover)
+                                &source.source,
+                            )?
+                            .map(|cover| cover.sha256)
+                        } else {
+                            None
+                        };
+                        (
+                            PlannedAudio::Mpeg(source.source.clone()),
+                            has_cover,
+                            cover_sha256,
+                        )
                     }
                     _ => {
                         others += 1;
                         continue;
                     }
                 };
-                members.push(Member {
+                members.push(MemberPlan {
                     relative_path: row.relative_path.clone(),
                     source: path,
-                    audio,
                     track: u64::from_str_radix(track_id, 16)?,
                     album: u64::from_str_radix(&album.id, 16)?,
                     artist: u64::from_str_radix(&artist.id, 16)?,
                     destination: destination.clone(),
-                    cover,
+                    has_cover,
+                    carry_cover: true,
                     keep_album_image: false,
-                    conversion: None,
                     convert: row.flac_to_alac,
+                    cover_sha256,
+                    audio,
                 });
             }
             // Sync sends metadata updates after the batches.
@@ -1092,7 +1220,7 @@ pub(crate) async fn add_all(
     journal_path: &Path,
     identity: &Identity,
     mut removals: Vec<u64>,
-    members: &mut [Member],
+    members: &[MemberPlan],
     collection: [u8; 32],
     batch_size: usize,
     coordination: Option<CoordinationId>,
@@ -1116,10 +1244,7 @@ pub(crate) async fn add_all(
         link.settle(&control).await?;
     }
     let total = members.len();
-    let bytes = members
-        .iter()
-        .map(|m| std::fs::metadata(&m.source).map_or(0, |m| m.len()))
-        .sum();
+    let bytes = members.iter().map(MemberPlan::bytes).sum();
     let mut conversions = match converter {
         Some(converter) => {
             lookahead::Lookahead::ffmpeg(members, batch_size, converter, control().cancelled)?
@@ -1151,12 +1276,16 @@ pub(crate) async fn add_all(
         };
         let offset = std::mem::replace(&mut start, end);
         let batches = number + 1 + (total - end).div_ceil(batch_size);
-        let chunk = &mut members[offset..end];
+        // Read this batch's sources and covers now; the batch drops them.
+        let mut chunk: Vec<Member> = members[offset..end]
+            .iter()
+            .map(MemberPlan::materialize)
+            .collect::<Result<_>>()?;
         let sendable = match conversions.as_mut() {
-            Some(conversions) => conversions.batch(chunk, offset, &mut refused).await?,
+            Some(conversions) => conversions.batch(&mut chunk, offset, &mut refused).await?,
             None => chunk.len(),
         };
-        let chunk = &mut chunk[..sendable];
+        chunk.truncate(sendable);
         if chunk.is_empty() {
             continue;
         }
@@ -1183,7 +1312,7 @@ pub(crate) async fn add_all(
         for member in keep_album_images(
             &before.current,
             &before.directory,
-            chunk,
+            &mut chunk,
             &control,
             device::provider,
         )

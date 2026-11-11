@@ -22,7 +22,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-use super::{Audio, Member};
+use super::{Audio, Member, MemberPlan, PlannedAudio};
 use crate::{
     engine::execution::flac_to_alac::{self, Converted},
     engine::planning::source_collection::mp3::preparation::PreparedSource,
@@ -44,7 +44,8 @@ const POLL: Duration = Duration::from_millis(250);
 pub(super) struct Job {
     pub(super) index: usize,
     pub(super) flac: PathBuf,
-    pub(super) prepared: Arc<PreparedSource>,
+    /// What planning read of the FLAC; the worker reads the file again.
+    expected: music_protocol::media::mpeg::Source,
     /// The planned cover's SHA-256: the ALAC must hold the same.
     cover: Option<[u8; 32]>,
     /// The FLAC's size; converting it needs room for twice as much.
@@ -64,6 +65,25 @@ enum Outcome {
 
 type Convert = dyn Fn(&Job, &dyn Fn() -> bool) -> Result<Converted> + Send + Sync;
 type Room = dyn Fn() -> Result<u64> + Send + Sync;
+
+/// The FLACs of `members` that convert, in member order, without reading
+/// their sources: a worker reads one when its conversion starts.
+fn jobs(members: &[MemberPlan]) -> Result<VecDeque<Job>> {
+    let mut jobs = VecDeque::new();
+    for (index, member) in members.iter().enumerate().filter(|(_, m)| m.convert) {
+        let PlannedAudio::Mpeg(expected) = &member.audio else {
+            bail!("{} is not a FLAC", member.relative_path);
+        };
+        jobs.push_back(Job {
+            index,
+            flac: member.source.clone(),
+            expected: expected.clone(),
+            cover: member.cover_sha256,
+            bytes: expected.fingerprint.file_bytes,
+        });
+    }
+    Ok(jobs)
+}
 
 struct Shared {
     state: Mutex<State>,
@@ -123,7 +143,7 @@ impl Lookahead {
     /// Convert `members`' FLACs with FFmpeg into `converter`'s directory,
     /// for batches of `window` members. None when no member converts.
     pub(super) fn ffmpeg(
-        members: &[Member],
+        members: &[MemberPlan],
         window: usize,
         converter: &flac_to_alac::Converter,
         cancelled: Arc<AtomicBool>,
@@ -132,15 +152,16 @@ impl Lookahead {
         let directory = converter.directory.path().to_owned();
         let room = directory.clone();
         let into = directory.clone();
-        Self::start(
-            members,
+        Self::start_jobs(
+            jobs(members)?,
             window,
             threads(),
             cancelled,
             &directory,
             move || flac_to_alac::available(&room),
             move |job, abandoned| {
-                flac_to_alac::convert_into(&ffmpeg, &job.flac, &job.prepared, &into, abandoned)
+                let prepared = PreparedSource::read_expected(&job.flac, &job.expected)?;
+                flac_to_alac::convert_into(&ffmpeg, &job.flac, &prepared, &into, abandoned)
             },
         )
     }
@@ -148,7 +169,9 @@ impl Lookahead {
     /// Convert `members`' FLACs (`convert`) on `threads` workers with
     /// `convert`, which puts each into `directory`; `room` is the free space
     /// there. Nothing starts before the first [`Self::batch`]; a cancel stops
-    /// the conversions.
+    /// the conversions. Tests use it with already-read members; a run builds
+    /// its jobs from the plan so it holds no source ahead of its batch.
+    #[cfg(test)]
     pub(super) fn start(
         members: &[Member],
         window: usize,
@@ -158,7 +181,6 @@ impl Lookahead {
         room: impl Fn() -> Result<u64> + Send + Sync + 'static,
         convert: impl Fn(&Job, &dyn Fn() -> bool) -> Result<Converted> + Send + Sync + 'static,
     ) -> Result<Option<Self>> {
-        ensure!(window > 0, "batch size must be positive");
         let mut jobs = VecDeque::new();
         for (index, member) in members.iter().enumerate().filter(|(_, m)| m.convert) {
             let Audio::Mpeg(prepared) = &member.audio else {
@@ -167,11 +189,25 @@ impl Lookahead {
             jobs.push_back(Job {
                 index,
                 flac: member.source.clone(),
-                prepared: Arc::clone(prepared),
+                expected: prepared.source().clone(),
                 cover: member.cover.as_ref().map(|c| c.sha256),
                 bytes: prepared.identity().file_bytes,
             });
         }
+        Self::start_jobs(jobs, window, threads, cancelled, directory, room, convert)
+    }
+
+    /// Start `threads` workers over `jobs`, in member order.
+    fn start_jobs(
+        jobs: VecDeque<Job>,
+        window: usize,
+        threads: usize,
+        cancelled: Arc<AtomicBool>,
+        directory: &Path,
+        room: impl Fn() -> Result<u64> + Send + Sync + 'static,
+        convert: impl Fn(&Job, &dyn Fn() -> bool) -> Result<Converted> + Send + Sync + 'static,
+    ) -> Result<Option<Self>> {
+        ensure!(window > 0, "batch size must be positive");
         if jobs.is_empty() {
             return Ok(None);
         }

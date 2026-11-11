@@ -499,19 +499,19 @@ pub(crate) async fn run_with(
         for member in &mut batched.members {
             match batch_cover(
                 protected_albums.contains(&member.album),
-                matches!(member.audio, insert_batch::Audio::Alac { .. }),
+                member.alac(),
                 keep_album_image,
             ) {
                 BatchCover::Carried => {}
                 BatchCover::IfAlbumImage => member.keep_album_image = true,
-                BatchCover::CoverStep => member.cover = None,
+                BatchCover::CoverStep => member.carry_cover = false,
             }
         }
-        batched_covers = batched.members.iter().filter(|m| m.cover.is_some()).count();
+        batched_covers = batched.members.iter().filter(|m| m.sends_cover()).count();
         let carried: Vec<_> = batched
             .members
             .iter()
-            .map(|m| (m.source.as_path(), m.cover.is_some()))
+            .map(|m| (m.source.as_path(), m.sends_cover()))
             .collect();
         covers_after_batches(&mut covers, &carried);
     }
@@ -530,7 +530,7 @@ pub(crate) async fn run_with(
                 &saved,
                 &journal,
                 &run,
-                &mut batched.members,
+                &batched.members,
                 batched.scope,
                 link,
             )
@@ -741,7 +741,7 @@ async fn add_in_batches(
     saved: &snapshot::Snapshot,
     journal: &Path,
     run: &Path,
-    members: &mut [insert_batch::Member],
+    members: &[insert_batch::MemberPlan],
     scope: [u8; 32],
     link: &mut crate::engine::execution::link::RunLink,
 ) -> Result<Added> {

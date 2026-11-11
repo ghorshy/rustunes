@@ -257,6 +257,55 @@ fn pending(path: &Path) -> Member {
     }
 }
 
+/// The plan a batch is built from, as `members` makes it.
+fn plans(members: &[Member]) -> Vec<MemberPlan> {
+    members
+        .iter()
+        .map(|member| MemberPlan {
+            relative_path: member.relative_path.clone(),
+            source: member.source.clone(),
+            track: member.track,
+            album: member.album,
+            artist: member.artist,
+            destination: member.destination.clone(),
+            has_cover: member.cover.is_some(),
+            carry_cover: true,
+            keep_album_image: member.keep_album_image,
+            convert: member.convert,
+            cover_sha256: member.cover.as_ref().map(|cover| cover.sha256),
+            audio: match &member.audio {
+                Audio::Alac {
+                    fingerprint,
+                    metadata,
+                } => PlannedAudio::Alac {
+                    fingerprint: fingerprint.clone(),
+                    metadata: metadata.clone(),
+                },
+                Audio::Mpeg(prepared) => PlannedAudio::Mpeg(prepared.source().clone()),
+            },
+        })
+        .collect()
+}
+
+#[test]
+fn a_batch_reads_a_cover_only_when_it_carries_it() {
+    let temp = Temp::new("lazy-cover");
+    let song = flac(&temp, "song.flac", &[], true);
+    let plan = plans(&[pending(&song)]).pop().unwrap();
+    assert!(plan.has_cover, "the plan knows the source has a cover");
+
+    let mut carried = plan.clone();
+    let member = carried.materialize().unwrap();
+    assert!(member.cover.is_some(), "a carried cover is read");
+
+    carried.carry_cover = false;
+    let member = carried.materialize().unwrap();
+    assert!(
+        member.cover.is_none(),
+        "a cover the cover step sends is not read with its batch"
+    );
+}
+
 #[tokio::test]
 async fn a_batch_converts_its_flacs_and_goes_on_without_a_refused_one() {
     let temp = Temp::new("convert");
@@ -277,8 +326,9 @@ async fn a_batch_converts_its_flacs_and_goes_on_without_a_refused_one() {
         ffmpeg: flac_to_alac::require_ffmpeg().unwrap(),
         directory: flac_to_alac::Directory::create().unwrap(),
     };
+    let planned = plans(&chunk);
     let mut conversions =
-        lookahead::Lookahead::ffmpeg(&chunk, 3, &converter, Arc::new(AtomicBool::new(false)))
+        lookahead::Lookahead::ffmpeg(&planned, 3, &converter, Arc::new(AtomicBool::new(false)))
             .unwrap()
             .unwrap();
     let mut refusals = Vec::new();
