@@ -71,6 +71,7 @@ pub(crate) mod recent_counters;
 pub(crate) use music_protocol::catalogue::sqlite::tables::values as sql_values;
 
 pub(crate) mod artwork;
+pub(crate) mod artwork_clear_sql;
 pub(crate) mod audio_capture;
 pub(crate) mod catalogue_capture;
 pub(crate) mod journal;

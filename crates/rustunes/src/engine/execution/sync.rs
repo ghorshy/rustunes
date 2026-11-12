@@ -798,7 +798,7 @@ async fn add_in_batches(
                 inserted,
                 total,
                 removed: settled.removed,
-                inherited: settled.inherited_covers,
+                cleared: settled.cleared_covers,
             })
         },
         |member| {

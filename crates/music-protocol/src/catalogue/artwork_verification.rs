@@ -123,6 +123,37 @@ pub struct VerifiedArtwork {
     pub unverified_fields: [&'static str; 4],
 }
 
+/// One track's own artwork registration removed, with the rest of the
+/// catalogue exact. The target album's registration may move as the phone
+/// recomputes its representative; cached objects are exact.
+#[derive(Serialize)]
+pub struct VerifiedArtworkClear {
+    pub schema: &'static str,
+    pub target_track_id: String,
+    pub target_album_id: String,
+    pub prior_track_cache_id: Option<u32>,
+    pub prior_album_cache_id: Option<u32>,
+    pub current_album_cache_id: Option<u32>,
+    pub media_anchor: u32,
+    pub before_database_sha256: String,
+    pub before_wal_sha256: Option<String>,
+    pub after_database_sha256: String,
+    pub after_wal_sha256: Option<String>,
+    pub target_track_registration_cleared: bool,
+    pub other_track_registrations_preserved: bool,
+    pub cached_artwork_objects_preserved: bool,
+    pub audio_and_artwork_bytes_verified_by_this_check: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_play_count_resets: Vec<RecentPlayCountReset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_play_count_import_rule: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_skip_count_resets: Vec<RecentSkipCountReset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_count_import_rule: Option<&'static str>,
+    pub unverified_fields: [&'static str; 4],
+}
+
 /// One track's playback between the write and a later capture.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ListenedTrack {
@@ -185,6 +216,166 @@ pub fn verify_independent_representative_after_listening(
         false,
         Some(listening),
     )
+}
+
+/// One track's own artwork registration removed, with no other catalogue
+/// change: the anchor moves once, every typed track field and statistic is
+/// exact apart from the qualified recent-count reset, the target's track-level
+/// registrations are gone, and every other track and album registration stays.
+/// The target album's own registration may stay, leave, or take another
+/// member's cover, as the phone may recompute its representative; cached
+/// artwork rows are exact.
+pub fn verify_track_cleared(
+    before: &Catalog,
+    after: &Catalog,
+    target_sync_id: u64,
+) -> Result<VerifiedArtworkClear> {
+    ensure!(
+        before.composers() == after.composers()
+            && before.track_composers() == after.track_composers(),
+        "artwork clear changed composer lookup, sort label or track order"
+    );
+    ensure!(
+        before
+            .tracks()
+            .iter()
+            .all(|t| before.title_sort(t.sync_id) == after.title_sort(t.sync_id)),
+        "artwork clear changed an exact title sort value"
+    );
+    let (album_id, resets, skip_resets) =
+        check_clear_views(&View::from(before), &View::from(after), target_sync_id)?;
+    Ok(VerifiedArtworkClear {
+        schema: "music-protocol.artwork-clear-catalog-verification",
+        target_track_id: format!("{target_sync_id:016x}"),
+        target_album_id: format!("{album_id:016x}"),
+        prior_track_cache_id: before
+            .artwork()
+            .track_cache_ids()
+            .get(&target_sync_id)
+            .copied(),
+        prior_album_cache_id: before.artwork().album_cache_ids().get(&album_id).copied(),
+        current_album_cache_id: after.artwork().album_cache_ids().get(&album_id).copied(),
+        media_anchor: after.persisted_media_anchor(),
+        before_database_sha256: hex(&before.source_hashes().database),
+        before_wal_sha256: before.source_hashes().wal.map(|value| hex(&value)),
+        after_database_sha256: hex(&after.source_hashes().database),
+        after_wal_sha256: after.source_hashes().wal.map(|value| hex(&value)),
+        target_track_registration_cleared: !after
+            .artwork()
+            .tracks_with_artwork_registration()
+            .contains(&target_sync_id),
+        other_track_registrations_preserved: true,
+        cached_artwork_objects_preserved: true,
+        recent_play_count_import_rule: (!resets.is_empty()).then_some(RECENT_PLAY_IMPORT_RULE),
+        recent_play_count_resets: resets,
+        recent_count_import_rule: (!skip_resets.is_empty()).then_some(RECENT_COUNT_IMPORT_RULE),
+        recent_skip_count_resets: skip_resets,
+        audio_and_artwork_bytes_verified_by_this_check: false,
+        unverified_fields: [
+            "SQL columns not projected by Catalog, except exact item_stats preservation fingerprints",
+            "best_artwork_token rows, which Catalog does not project",
+            "AFC artwork files, dimensions, JPEG bytes and rendered pixels",
+            "Source ownership, reservation, protocol completion and full audio bytes",
+        ],
+    })
+}
+
+/// The transition proper: the target's track-level registration is gone,
+/// every other registration and collection is exact, and the target album may
+/// stay, leave or take another member's cover.
+fn check_clear_views(
+    before: &View<'_>,
+    after: &View<'_>,
+    target: u64,
+) -> Result<(u64, Vec<RecentPlayCountReset>, Vec<RecentSkipCountReset>)> {
+    ensure!(
+        before.database == after.database && before.container == after.container,
+        "catalog identity changed across artwork clear"
+    );
+    ensure!(
+        after.anchor
+            == before
+                .anchor
+                .checked_add(1)
+                .context("Media anchor exhausted")?,
+        "artwork clear did not advance the Media anchor by exactly one"
+    );
+    let old: BTreeMap<_, _> = before
+        .tracks
+        .iter()
+        .map(|track| (track.sync_id, track))
+        .collect();
+    let new: BTreeMap<_, _> = after
+        .tracks
+        .iter()
+        .map(|track| (track.sync_id, track))
+        .collect();
+    ensure!(
+        old.len() == before.tracks.len()
+            && new.len() == after.tracks.len()
+            && old.keys().eq(new.keys()),
+        "artwork clear added, removed or duplicated a track"
+    );
+    let (resets, skip_resets) = exact_tracks(before, after, &old, &new)?;
+    let target_track = old.get(&target).context("artwork clear target is absent")?;
+    ensure!(
+        before.albums == after.albums
+            && before.artists == after.artists
+            && before.represented == after.represented,
+        "artwork clear changed a collection, membership count or mapped identity"
+    );
+    let mut expected_track_art = before.track_art.clone();
+    expected_track_art.remove(&target);
+    ensure!(
+        *after.track_art == expected_track_art,
+        "artwork clear left the target's cover or changed another track's registration"
+    );
+    let mut expected_registered = before.registered_tracks.clone();
+    expected_registered.remove(&target);
+    ensure!(
+        *after.registered_tracks == expected_registered,
+        "artwork clear left the target's token rows or changed another track's"
+    );
+    let album = target_track.album_sync_id;
+    let member_caches: BTreeSet<u32> = after
+        .track_art
+        .iter()
+        .filter(|(track, _)| new.get(track).is_some_and(|row| row.album_sync_id == album))
+        .map(|(_, cache)| *cache)
+        .collect();
+    let before_album = before.album_art.get(&album).copied();
+    let after_album = after.album_art.get(&album).copied();
+    ensure!(
+        after_album == before_album
+            || after_album.is_none()
+            || after_album.is_some_and(|cache| member_caches.contains(&cache)),
+        "target album cache is neither unchanged, absent, nor another member's cover"
+    );
+    for (id, cache) in before.album_art {
+        if *id != album {
+            ensure!(
+                after.album_art.get(id) == Some(cache),
+                "artwork clear changed another album's registration"
+            );
+        }
+    }
+    for id in after.album_art.keys() {
+        if *id != album {
+            ensure!(
+                before.album_art.contains_key(id),
+                "artwork clear added an album registration"
+            );
+        }
+    }
+    ensure!(
+        before.orphan_album_art == after.orphan_album_art,
+        "artwork clear changed an orphan album registration"
+    );
+    ensure!(
+        before.cached == after.cached && before.cached_objects == after.cached_objects,
+        "artwork clear changed a cached artwork row"
+    );
+    Ok((album, resets, skip_resets))
 }
 
 fn verify_policy(
@@ -284,6 +475,8 @@ struct View<'a> {
     cached_objects: &'a BTreeMap<(u32, i64), CachedArtwork>,
     track_art: &'a BTreeMap<u64, u32>,
     album_art: &'a BTreeMap<u64, u32>,
+    registered_tracks: &'a BTreeSet<u64>,
+    orphan_album_art: &'a BTreeMap<i64, u32>,
 }
 
 impl<'a> From<&'a Catalog> for View<'a> {
@@ -305,6 +498,8 @@ impl<'a> From<&'a Catalog> for View<'a> {
             cached_objects: catalog.artwork().cached_objects(),
             track_art: catalog.artwork().track_cache_ids(),
             album_art: catalog.artwork().album_cache_ids(),
+            registered_tracks: catalog.artwork().tracks_with_artwork_registration(),
+            orphan_album_art: catalog.artwork().orphan_album_cache_ids(),
         }
     }
 }
@@ -1305,5 +1500,51 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn cleared_transition(after_sql: &str) -> (Catalog, Catalog) {
+        let art =
+            "INSERT INTO artwork VALUES('100',300,6,0,'aa/00000000000000000000000000000000000000');
+            INSERT INTO artwork_token VALUES(1,'100',300,1,0,0),(31,'100',300,6,4,0);";
+        (
+            crate::test_support::catalogue::modified_collection_catalog(13, art),
+            crate::test_support::catalogue::modified_collection_catalog(
+                14,
+                &format!("{art}{after_sql}"),
+            ),
+        )
+    }
+
+    #[test]
+    fn a_clear_removes_only_the_target_tracks_registration() {
+        let clear = "DELETE FROM artwork_token WHERE entity_type=0;";
+        let (before, after) = cleared_transition(clear);
+        let proof = verify_track_cleared(&before, &after, u64::MAX).unwrap();
+        assert_eq!(proof.prior_track_cache_id, Some(100));
+        assert_eq!(proof.current_album_cache_id, Some(100));
+        assert!(proof.target_track_registration_cleared);
+        assert_eq!(proof.media_anchor, 14);
+        // The album may leave too, as the phone recomputes its representative.
+        let (before, after) = cleared_transition(&format!("{clear} DELETE FROM artwork_token;"));
+        assert!(verify_track_cleared(&before, &after, u64::MAX).is_ok());
+    }
+
+    #[test]
+    fn a_clear_refuses_a_remaining_target_or_another_registration_change() {
+        for after_sql in [
+            "",
+            "DELETE FROM artwork_token WHERE entity_type=4;",
+            "UPDATE item_extra SET title='Other';",
+            "UPDATE artwork_token SET artwork_token='101' WHERE entity_type=4;",
+            "DELETE FROM artwork;",
+        ] {
+            let (before, after) = cleared_transition(after_sql);
+            assert!(
+                verify_track_cleared(&before, &after, u64::MAX).is_err(),
+                "{after_sql}"
+            );
+        }
+        let (before, after) = cleared_transition("DELETE FROM artwork_token WHERE entity_type=0;");
+        assert!(verify_track_cleared(&before, &after, 555).is_err());
     }
 }

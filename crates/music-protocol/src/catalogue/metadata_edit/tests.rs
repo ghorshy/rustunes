@@ -53,6 +53,8 @@ fn every_item_key_round_trips_with_exact_types() {
             ("content_rating", int(2)),
             ("copyright", text("(C) 2026")),
             ("comment", text("Line one\nLine two")),
+            ("artwork_cache_id", int(0)),
+            ("artwork_checksum", int(0)),
         ],
     );
     assert_eq!(full.item.len(), ITEM_KEYS.len());
@@ -230,6 +232,24 @@ fn encoder_refuses_invalid_updates() {
         (
             "content rating 3",
             vec![update(1, &[("content_rating", int(3))])],
+        ),
+        (
+            "artwork cache negative",
+            vec![update(1, &[("artwork_cache_id", int(-1))])],
+        ),
+        (
+            "artwork checksum beyond u32",
+            vec![update(
+                1,
+                &[(
+                    "artwork_checksum",
+                    Value::Integer((i64::from(u32::MAX) + 1).into()),
+                )],
+            )],
+        ),
+        (
+            "artwork checksum as text",
+            vec![update(1, &[("artwork_checksum", text("0"))])],
         ),
         (
             "compilation integer",

@@ -49,9 +49,10 @@ use crate::{
     },
     engine::state::snapshot::{self, Snapshot},
     engine::verification::artwork::{TrackArtworkExpectation, TrackCheck},
+    engine::verification::artwork_clear_sql,
     engine::verification::sql_tables::{
         Capture,
-        reader::{self, Budget},
+        reader::{self, Budget, Cell},
     },
     engine::{
         execution::{
@@ -59,15 +60,16 @@ use crate::{
             removal_batch::{self, Before, controlled, hex, next_directory, sha},
         },
         recovery::stale_staging,
-        verification::removal_sql,
+        verification::{removal_sql, sql_values as typed},
     },
 };
 use music_protocol::catalogue::insert_verification::{self, ExpectedInsert, ExpectedSource};
+use music_protocol::catalogue::metadata_edit::{self, Envelope, TrackUpdate};
 use music_protocol::catalogue::mutation;
 use music_protocol::media::artwork::{self, Cover};
 use music_protocol::media::fingerprint::{SourceFingerprint, TransferredSource};
 use music_protocol::media::metadata::{self, Metadata};
-use music_protocol::protocol::session;
+use music_protocol::protocol::session::{self, StartedOperation};
 use music_protocol::protocol::templates;
 use music_protocol::protocol::transfer::{MAX_ASSET, MAX_SESSION_OPS, Transfer};
 
@@ -494,8 +496,182 @@ pub(crate) struct Settled {
     /// Tracks a session's removal half removed.
     pub(crate) removed: usize,
     /// Inserted tracks whose source sent no cover but whose reused internal
-    /// item pid still held the phone's own registration, left as it was.
-    pub(crate) inherited_covers: usize,
+    /// item pid still held the phone's own registration; this run cleared it.
+    pub(crate) cleared_covers: usize,
+}
+
+/// A metadata-only clear session that is not journaled on its own: the insert
+/// batch's Started state is the retry record.
+struct ClearStarted {
+    operation: Vec<u8>,
+    signature: [u8; 21],
+}
+
+impl StartedOperation for ClearStarted {
+    fn operation(&self) -> &[u8] {
+        &self.operation
+    }
+    fn signature(&self) -> &[u8; 21] {
+        &self.signature
+    }
+}
+
+/// One bound, uncovered target whose reused internal item pid still holds the
+/// phone's own entity-type-0 artwork-token rows.
+struct CleanupTarget {
+    track: u64,
+    album: u64,
+    item_pid: i64,
+}
+
+/// The target track's internal item pid in a fresh typed catalogue.
+fn sql_item_pid(sql: &reader::Snapshot, track: u64) -> Result<i64> {
+    let store = sql.table("item_store")?;
+    let row = typed::unique(store, "sync_id", Cell::Integer(track as i64))
+        .with_context(|| format!("track {track:016x} is not in the fresh catalogue"))?;
+    typed::int(store, row, "item_pid")
+}
+
+/// Entity-type-0 rows the item owns in both token tables.
+fn token_rows(sql: &reader::Snapshot, item_pid: i64) -> Result<usize> {
+    let mut rows = 0;
+    for name in ["artwork_token", "best_artwork_token"] {
+        let table = sql.table(name)?;
+        let pid = table.column("entity_pid")?;
+        let entity = table.column("entity_type")?;
+        rows += table
+            .rows
+            .iter()
+            .filter(|(row, _)| {
+                row[entity] == Cell::Integer(0) && row[pid] == Cell::Integer(item_pid)
+            })
+            .map(|(_, count)| *count as usize)
+            .sum::<usize>();
+    }
+    Ok(rows)
+}
+
+/// The native `update_track` that names only the two zero artwork fields, which
+/// together clear the track's own registration (E10).
+fn clear_operation(before: &Before, track: u64) -> Result<Vec<u8>> {
+    let catalog = &before.current.catalog;
+    let revision = catalog
+        .persisted_media_anchor()
+        .checked_add(1)
+        .context("media anchor exhausted")?;
+    let timestamp =
+        UNIX_EPOCH + Duration::from_secs(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
+    metadata_edit::encode(
+        &Envelope {
+            database_pid: catalog.database_pid(),
+            primary_container_pid: catalog.primary_container_pid(),
+            revision,
+            timestamp,
+        },
+        &[TrackUpdate {
+            sync_id: track,
+            item: BTreeMap::from([
+                ("artwork_cache_id".to_owned(), 0u64.into()),
+                ("artwork_checksum".to_owned(), 0u64.into()),
+            ]),
+        }],
+    )
+}
+
+/// Send and verify one clear session per target, in order, each against its own
+/// fresh capture pair. A target whose session provably did not start leaves the
+/// batch Started for the next observation.
+async fn clear_inherited_artwork(
+    batch: &InsertBatchRecord,
+    identity: &Identity,
+    host_name: &str,
+    targets: &[CleanupTarget],
+    mut anchor: u32,
+    control: &Control,
+    link: &mut RunLink,
+) -> Result<(u32, Vec<serde_json::Value>)> {
+    let mut proofs = Vec::with_capacity(targets.len());
+    for target in targets {
+        control.check()?;
+        let directory = next_directory(&batch.evidence, "clear")?;
+        create_trace(&directory)?;
+        let before =
+            removal_batch::capture_before(&directory.join("before"), identity, control).await?;
+        let operation = clear_operation(&before, target.track)?;
+        durable_write(&directory, "operation.plist", &operation)?;
+        let send = directory.join("send");
+        let wire = match removal_batch::send_metadata_only(
+            &before,
+            &operation,
+            removal_batch::Requests::Refuse(target.track),
+            sha(&operation),
+            host_name,
+            &send,
+            control,
+            link,
+            |_ready, signature| {
+                Ok(ClearStarted {
+                    operation: operation.clone(),
+                    signature,
+                })
+            },
+        )
+        .await
+        {
+            removal_batch::Sent::Unsent(error) => {
+                return Err(error).context(format!(
+                    "artwork clear of track {:016x} sent nothing; insert batch {} stays Started",
+                    target.track,
+                    batch.id.as_i64()
+                ));
+            }
+            removal_batch::Sent::Started(wire) => wire,
+        };
+        if let Err(error) = &wire {
+            let _ = durable_write(
+                &send,
+                "error.txt",
+                format!("{error:#}\nThe clear session is Started; its effect is observed below.\n")
+                    .as_bytes(),
+            );
+        }
+        let after =
+            removal_batch::capture_before(&directory.join("after"), identity, control).await?;
+        let proof = artwork_clear_sql::verify(
+            &before.sql.tables,
+            &after.sql.tables,
+            &operation,
+            before.anchor(),
+        )
+        .with_context(|| {
+            format!(
+                "the artwork clear of track {:016x} is not the observed effect; insert batch {} stays Started and {} keeps the after state",
+                target.track,
+                batch.id.as_i64(),
+                directory.display()
+            )
+        })?;
+        let verified_anchor = proof.verified_anchor;
+        let record = serde_json::to_vec_pretty(&json!({
+            "schema":"rustunes.artwork-clear","track":format!("{:016x}",target.track),
+            "item_pid":target.item_pid,"album":format!("{:016x}",target.album),
+            "operation_sha256":hex(&sha(&operation)),
+            "wire":wire.as_ref().ok().map(|(ready, terminal, _)| json!({
+                "ready_sha256":hex(ready),"terminal_sha256":hex(terminal),
+            })),
+            "wire_error":wire.as_ref().err().map(|error| format!("{error:#}")),
+            "proof":&proof,
+        }))?;
+        durable_write(&directory, "proof.json", &record)?;
+        proofs.push(json!({
+            "track":format!("{:016x}",target.track),
+            "album":format!("{:016x}",target.album),
+            "item_pid":target.item_pid,
+            "evidence":directory,
+        }));
+        anchor = verified_anchor;
+    }
+    Ok((anchor, proofs))
 }
 
 /// What one target's row must be: its source's tags and the groups the plan
@@ -826,7 +1002,9 @@ pub(crate) async fn run(
             &batch,
             &planned,
             Window::SameRun,
+            host_name,
             control,
+            link,
         )
         .await,
         wire,
@@ -1624,8 +1802,8 @@ pub(crate) struct Resumed {
     /// Tracks a session's removal half removed, observed now.
     pub(crate) removed: usize,
     /// Inserted tracks whose reused internal item pid still held the phone's
-    /// own cover registration, left as it was.
-    pub(crate) inherited_covers: usize,
+    /// own cover registration; the resume cleared it.
+    pub(crate) cleared_covers: usize,
     /// The removal batch that took out the rows a Partial batch left
     /// without audio.
     pub(crate) compensation: Option<removal_batch::Settled>,
@@ -1667,18 +1845,20 @@ pub(crate) async fn resume(
                 evidence: batch.evidence.clone(),
                 inserted: 0,
                 removed: 0,
-                inherited_covers: 0,
+                cleared_covers: 0,
                 compensation: None,
             }
         }
         InsertBatchState::Started => {
-            let settled = settle(&mut journal, identity, batch, control).await?;
+            let mut link = RunLink::new(batch.evidence.join("resume-link"));
+            let settled =
+                settle(&mut journal, identity, batch, host_name, control, &mut link).await?;
             Resumed {
                 state: settled.state,
                 evidence: settled.evidence,
                 inserted: settled.inserted,
                 removed: settled.removed,
-                inherited_covers: settled.inherited_covers,
+                cleared_covers: settled.cleared_covers,
                 compensation: None,
             }
         }
@@ -1687,7 +1867,7 @@ pub(crate) async fn resume(
             evidence: batch.evidence.clone(),
             inserted: bound(batch),
             removed: 0,
-            inherited_covers: 0,
+            cleared_covers: 0,
             compensation: None,
         },
         other => bail!("insert batch {id} is {other:?} and needs no recovery"),
@@ -1734,7 +1914,9 @@ pub(crate) async fn settle(
     journal: &mut Journal,
     identity: &Identity,
     batch: &InsertBatchRecord,
+    host_name: &str,
     control: &Control,
+    link: &mut RunLink,
 ) -> Result<Settled> {
     let members = retained_members(batch)?;
     let mut sources = Vec::with_capacity(members.len());
@@ -1788,7 +1970,9 @@ pub(crate) async fn settle(
         batch,
         &planned,
         Window::LaterRun,
+        host_name,
         control,
+        link,
     )
     .await?;
     // With the directories that held conversions now gone, once empty.
@@ -1812,13 +1996,16 @@ pub(crate) async fn settle(
 /// NotApplied when nothing moved and nothing is staged but this batch's own
 /// unfinished operation pair, which is removed first. Otherwise the batch
 /// stays Started and the error says why.
+#[allow(clippy::too_many_arguments)]
 async fn settle_with(
     journal: &mut Journal,
     identity: &Identity,
     batch: &InsertBatchRecord,
     planned: &[Planned<'_>],
     window: Window,
+    host_name: &str,
     control: &Control,
+    link: &mut RunLink,
 ) -> Result<Settled> {
     ensure!(
         batch.state == InsertBatchState::Started,
@@ -1950,7 +2137,7 @@ async fn settle_with(
             evidence: run,
             inserted: 0,
             removed: 0,
-            inherited_covers: 0,
+            cleared_covers: 0,
         });
     }
     // The session's removals went with its operation, every one.
@@ -2024,6 +2211,48 @@ async fn settle_with(
             }
         }
     }
+    // Artwork rows the phone kept for a reused internal item pid survive an
+    // insert without a cover. Detect them in the fresh raw SQL before the
+    // catalogue check; each clear session below is verified against its own
+    // before and after captures.
+    let before_sql = removal_batch::materialize(&before, &run.join("sql-before"), control)?;
+    let after_sql = removal_batch::materialize(&after, &run.join("sql-after"), control)?;
+    let removed_pids: BTreeSet<i64> = removal
+        .iter()
+        .flat_map(|removal| removal.targets.iter().map(|target| target.item_pid))
+        .collect();
+    let mut clear_targets = Vec::new();
+    let mut cleared_albums = BTreeSet::new();
+    let mut inherited = 0;
+    for (ordinal, _) in &bound {
+        let content = &batch.targets[*ordinal].target.content;
+        if content.artwork.is_some() {
+            continue;
+        }
+        let item_pid = sql_item_pid(&after_sql, content.track_pid)?;
+        if removed_pids.contains(&item_pid) {
+            continue;
+        }
+        let had = token_rows(&before_sql, item_pid)?;
+        let now = token_rows(&after_sql, item_pid)?;
+        if had > 0 {
+            inherited += 1;
+            // The clear may revise this album's own registration, now or on a
+            // resume after only some clear sessions ran.
+            cleared_albums.insert(planned[*ordinal].album);
+            // A row that is still there (the clear did not run, or ran and the
+            // phone restored it) is cleared now. A registration the insert
+            // itself created for a track that had no rows before is the
+            // phone's placeholder, not an inherited cover.
+            if now > 0 {
+                clear_targets.push(CleanupTarget {
+                    track: content.track_pid,
+                    album: planned[*ordinal].album,
+                    item_pid,
+                });
+            }
+        }
+    }
     let expected: Vec<_> = batch
         .targets
         .iter()
@@ -2061,8 +2290,30 @@ async fn settle_with(
         None => None,
     };
     let prior = projected.as_ref().unwrap_or(&before.catalog);
-    let catalogue = match window {
-        Window::SameRun => insert_verification::verify_insert_batch_covered(
+    let insert_anchor = batch
+        .base_anchor
+        .checked_add(1)
+        .context("media anchor exhausted")?;
+    let cleanup_steps = anchor
+        .checked_sub(insert_anchor)
+        .context("insert anchor is below its prepared revision")?;
+    let post_cleanup = (cleanup_steps > 0).then_some(insert_verification::PostInsertCleanup {
+        anchor_steps: cleanup_steps,
+        albums: &cleared_albums,
+    });
+    let catalogue = match (window, &post_cleanup) {
+        (Window::SameRun, Some(cleanup)) => {
+            insert_verification::verify_insert_batch_covered_with_cleanup(
+                prior,
+                &after.catalog,
+                &expected,
+                &locationless,
+                &removed_tracks,
+                &covers,
+                cleanup,
+            )
+        }
+        (Window::SameRun, None) => insert_verification::verify_insert_batch_covered(
             prior,
             &after.catalog,
             &expected,
@@ -2070,15 +2321,29 @@ async fn settle_with(
             &removed_tracks,
             &covers,
         ),
-        Window::LaterRun => insert_verification::verify_insert_batch_after_listening(
-            prior,
-            &after.catalog,
-            &expected,
-            &locationless,
-            &removed_tracks,
-            &covers,
-            &between_runs::catalogue_listening,
-        ),
+        (Window::LaterRun, Some(cleanup)) => {
+            insert_verification::verify_insert_batch_after_listening_with_cleanup(
+                prior,
+                &after.catalog,
+                &expected,
+                &locationless,
+                &removed_tracks,
+                &covers,
+                &between_runs::catalogue_listening,
+                cleanup,
+            )
+        }
+        (Window::LaterRun, None) => {
+            insert_verification::verify_insert_batch_after_listening(
+                prior,
+                &after.catalog,
+                &expected,
+                &locationless,
+                &removed_tracks,
+                &covers,
+                &between_runs::catalogue_listening,
+            )
+        }
     }
     .with_context(|| {
                 format!(
@@ -2114,9 +2379,9 @@ async fn settle_with(
         );
     }
     // Covers the phone still held for a reused internal item pid, unchanged by
-    // this session. They are reported with the settled batch; the catalogue
-    // check above does not treat them as covers the batch sent.
-    let inherited_covers = catalogue.inherited_covers.len();
+    // this session, were detected above and are cleared after the insert and
+    // its covers verify; the catalogue check does not treat them as covers the
+    // batch sent.
     let checks: Vec<TrackCheck> = bound
         .iter()
         .filter_map(|(ordinal, _)| {
@@ -2145,15 +2410,36 @@ async fn settle_with(
                 )
             })?)
     };
+    // Only now, after the insert and its covers are verified against the state
+    // before any clear, remove the inherited registrations. A clear session
+    // moves the media anchor once and is verified on its own capture pair.
+    let (anchor, clear_proofs) = clear_inherited_artwork(
+        batch,
+        identity,
+        host_name,
+        &clear_targets,
+        anchor,
+        control,
+        link,
+    )
+    .await?;
     let mut receipt = json!({
         "schema":"rustunes.insert-batch-verification","batch":batch.id.as_i64(),
         "base_anchor":batch.base_anchor,"verified_anchor":anchor,
+        "catalogue_verified_anchor":catalogue.media_anchor,
         "before_index_sha256":hex(&batch.before_index),
         "after_index_sha256":hex(&after.index_receipt_sha256),
         "catalogue":catalogue,"prior_files_unchanged":true,
         "bound":bound.iter().map(|(n, h)| json!({"ordinal":n,"audio_sha256":hex(h)})).collect::<Vec<_>>(),
         "locationless":locationless.iter().map(|id| format!("{id:016x}")).collect::<Vec<_>>(),
     });
+    if inherited > 0 || !clear_proofs.is_empty() {
+        receipt["artwork_cleanup"] = json!({
+            "cleared_covers":inherited,
+            "sessions":clear_proofs.len(),
+            "proofs":clear_proofs,
+        });
+    }
     if !removed.is_empty() {
         receipt["removed_by_phone"] = json!(
             removed
@@ -2237,7 +2523,7 @@ async fn settle_with(
         evidence: run,
         inserted: bound.len(),
         removed: removing.len(),
-        inherited_covers,
+        cleared_covers: inherited,
     })
 }
 

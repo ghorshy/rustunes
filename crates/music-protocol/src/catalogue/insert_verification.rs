@@ -1182,7 +1182,49 @@ pub fn verify_insert_batch_covered(
     removed: &BTreeSet<u64>,
     covers: &BTreeMap<u64, u32>,
 ) -> Result<VerifiedInsertBatch> {
-    verify_batch(before, after, expected, locationless, removed, covers, None)
+    verify_batch(
+        before,
+        after,
+        expected,
+        locationless,
+        removed,
+        covers,
+        None,
+        None,
+    )
+}
+
+/// One or more artwork-clear sessions the phone applied after this batch's own
+/// session. Each moved the media anchor once, and each target album's own
+/// registration may have changed as the phone recomputed its representative;
+/// the clear verifier has already accepted those exact effects.
+pub struct PostInsertCleanup<'a> {
+    /// The clear sessions applied after the insert session.
+    pub anchor_steps: u32,
+    /// Albums whose own artwork registration a clear may have changed.
+    pub albums: &'a BTreeSet<u64>,
+}
+
+/// `verify_insert_batch_covered` after artwork-clear sessions have run.
+pub fn verify_insert_batch_covered_with_cleanup(
+    before: &Catalog,
+    after: &Catalog,
+    expected: &[ExpectedInsert<'_>],
+    locationless: &BTreeSet<u64>,
+    removed: &BTreeSet<u64>,
+    covers: &BTreeMap<u64, u32>,
+    cleanup: &PostInsertCleanup<'_>,
+) -> Result<VerifiedInsertBatch> {
+    verify_batch(
+        before,
+        after,
+        expected,
+        locationless,
+        removed,
+        covers,
+        None,
+        Some(cleanup),
+    )
 }
 
 /// The same checks for a later run's capture, after the phone may have been
@@ -1207,9 +1249,35 @@ pub fn verify_insert_batch_after_listening(
         removed,
         covers,
         Some(listening),
+        None,
     )
 }
 
+/// `verify_insert_batch_after_listening` after artwork-clear sessions have run.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_insert_batch_after_listening_with_cleanup(
+    before: &Catalog,
+    after: &Catalog,
+    expected: &[ExpectedInsert<'_>],
+    locationless: &BTreeSet<u64>,
+    removed: &BTreeSet<u64>,
+    covers: &BTreeMap<u64, u32>,
+    listening: &dyn Fn(&PlaybackStatistics, &PlaybackStatistics) -> Result<()>,
+    cleanup: &PostInsertCleanup<'_>,
+) -> Result<VerifiedInsertBatch> {
+    verify_batch(
+        before,
+        after,
+        expected,
+        locationless,
+        removed,
+        covers,
+        Some(listening),
+        Some(cleanup),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn verify_batch(
     before: &Catalog,
     after: &Catalog,
@@ -1218,6 +1286,7 @@ fn verify_batch(
     removed: &BTreeSet<u64>,
     covers: &BTreeMap<u64, u32>,
     listening: Option<&dyn Fn(&PlaybackStatistics, &PlaybackStatistics) -> Result<()>>,
+    cleanup: Option<&PostInsertCleanup<'_>>,
 ) -> Result<VerifiedInsertBatch> {
     ensure!(!expected.is_empty(), "insert batch has no targets");
     ensure!(
@@ -1225,13 +1294,15 @@ fn verify_batch(
             && before.primary_container_pid() == after.primary_container_pid(),
         "catalogue identity changed across insertion"
     );
+    let cleanup_steps = cleanup.map_or(0, |cleanup| cleanup.anchor_steps);
     ensure!(
         after.persisted_media_anchor()
             == before
                 .persisted_media_anchor()
                 .checked_add(1)
+                .and_then(|anchor| anchor.checked_add(cleanup_steps))
                 .context("media anchor exhausted")?,
-        "post-transfer media anchor differs from the one prepared operation"
+        "post-transfer media anchor differs from the prepared operation and its cleanups"
     );
     let inserted: BTreeSet<u64> = expected.iter().map(|e| e.track_id).collect();
     ensure!(
@@ -1399,7 +1470,15 @@ fn verify_batch(
         );
     }
     let released = released_album_cache_ids(before, after, expected, covers);
-    let checked = verify_batch_covers(before, after, expected, locationless, removed, covers)?;
+    let checked = verify_batch_covers(
+        before,
+        after,
+        expected,
+        locationless,
+        removed,
+        covers,
+        cleanup,
+    )?;
     ensure!(
         before
             .artwork()
@@ -1504,6 +1583,7 @@ fn verify_batch_covers(
     locationless: &BTreeSet<u64>,
     removed: &BTreeSet<u64>,
     covers: &BTreeMap<u64, u32>,
+    cleanup: Option<&PostInsertCleanup<'_>>,
 ) -> Result<BatchCovers> {
     let (old, new) = (before.artwork(), after.artwork());
     ensure!(
@@ -1582,7 +1662,11 @@ fn verify_batch_covers(
             .get(album)
             .is_some_and(|caches| caches.contains(cache))
     };
+    let cleaned = |album: &u64| cleanup.is_some_and(|cleanup| cleanup.albums.contains(album));
     for (album, cache) in old.album_cache_ids() {
+        if cleaned(album) {
+            continue;
+        }
         let now = new.album_cache_ids().get(album);
         ensure!(
             now == Some(cache) || now.is_some_and(|c| takes_member_cover(album, c)),
@@ -1590,6 +1674,9 @@ fn verify_batch_covers(
         );
     }
     for (album, cache) in new.album_cache_ids() {
+        if cleaned(album) {
+            continue;
+        }
         ensure!(
             old.album_cache_ids().contains_key(album) || takes_member_cover(album, cache),
             "album {album:016x} gained an unplanned cover registration"
@@ -2375,6 +2462,55 @@ Line two' WHERE item_pid=2;
             format!("{error:#}").contains("gained an unplanned cover"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn cleanup_sessions_may_move_the_anchor_clear_the_inherited_row_and_revise_its_album() {
+        let a = compilation_source("A", true);
+        let b = compilation_source("B", false);
+        let expected = [
+            compilation_expected(&a, true),
+            compilation_expected(&b, false),
+        ];
+        let none = BTreeSet::new();
+        let no_covers = BTreeMap::new();
+        // The reused item pid kept a registration and its cached object; the
+        // clear removes the registration but leaves the object unreferenced.
+        let before = compilation_state(0, &art(&[5608], &[(2, 5608, 1, 0)]));
+        let after = compilation_state_at(2, 14, &art(&[5608], &[]));
+        let albums = BTreeSet::from([9000]);
+        let cleanup = PostInsertCleanup {
+            anchor_steps: 1,
+            albums: &albums,
+        };
+        let checked = verify_insert_batch_covered_with_cleanup(
+            &before, &after, &expected, &none, &none, &no_covers, &cleanup,
+        )
+        .unwrap();
+        assert!(checked.covers.is_empty());
+        assert!(checked.inherited_covers.is_empty());
+        // Without the cleanup step the same state is a second anchor move.
+        let error =
+            verify_insert_batch_covered(&before, &after, &expected, &none, &none, &no_covers)
+                .err()
+                .expect("a second anchor move was accepted");
+        assert!(format!("{error:#}").contains("anchor"), "{error:#}");
+
+        // A clear may also release its album's own registration.
+        let emptied = "INSERT INTO album_artist VALUES(121,8000,'CLI Compilation Σύνολο',NULL);
+            INSERT INTO album VALUES(131,9000,'Compilation fixture album',121,1,NULL);";
+        let before =
+            compilation_state(0, &format!("{emptied}{}", art(&[120], &[(131, 120, 6, 4)])));
+        let after = compilation_state_at(2, 14, &art(&[120], &[]));
+        verify_insert_batch_covered_with_cleanup(
+            &before, &after, &expected, &none, &none, &no_covers, &cleanup,
+        )
+        .unwrap();
+        let error =
+            verify_insert_batch_covered(&before, &after, &expected, &none, &none, &no_covers)
+                .err()
+                .expect("a cleared album registration was accepted");
+        assert!(format!("{error:#}").contains("anchor"), "{error:#}");
     }
 
     #[test]

@@ -973,6 +973,7 @@ The table lists what was observed on the phone and what the tool does.
 | A rolled-back or never-sent removal batch while the process lives | Rolled back | The run retries once as a new batch from fresh state. A second such result stops the run. Unit tests only. OPEN on the phone |
 | Failed observation after a removal | Applied or not | Retried up to three times before the run stops |
 | Process dies between batches | Library partway through | Run the same command again: it settles the unfinished batch, then selects from fresh state |
+| Insert batch verified, then its inherited-artwork clear killed between sessions | Some clear sessions applied, their token rows gone | Batch stays Started. The next observation clears only the tracks whose token rows remain, and its insert verification tolerates one anchor step per applied clear and the revised registrations of those albums. DESIGN; unit tests only |
 
 In every one of these kill runs `resume` sent nothing again, and a `sync` met
 by the unfinished run refused and named the `resume` that settles it.
@@ -1263,6 +1264,22 @@ lets its play or skip date move only forward, with new plays or skips. The
 batch's own run stays exact. CONFIRMED: a batch left Started
 absorbed 2 plays and 1 skip on three tracks, besides 13 recent counters its
 own session cleared.
+
+An insert batch also clears an artwork registration the phone kept for an item
+pid the insert reused, when its source sent no cover (E9, E10). After the
+insert catalogue and its covers verify, one metadata-only `update_track` per
+affected track names `artwork_cache_id: 0` and `artwork_checksum: 0`; both
+zeros together remove the track's own entity-type-0 rows from
+`artwork_token` and `best_artwork_token`, while the `artwork` object stays
+unreferenced. Each clear session is verified against its own fresh before and
+after capture: the target rows leave both token tables, the target album's own
+registration may change, the media anchor moves once, and only the target
+item's and album's revisions, the sync properties and a recent-counter reset
+may differ. The clear sessions are not journaled separately; the insert batch
+stays Started until every one verifies, so a resume retries only the tracks
+whose token rows remain. Its insert verification then tolerates one anchor
+step per applied clear and the revised registrations of those albums.
+DESIGN; the probe established the phone's effect, unit tests the models.
 
 Removal and metadata batches absorb it too, whenever a later run observes one:
 `resume`, or a rerun of `delete`, `prune` or `clear` settling an earlier run's

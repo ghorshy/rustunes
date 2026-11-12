@@ -38,6 +38,8 @@ pub const ITEM_KEYS: &[&str] = &[
     "content_rating",
     "copyright",
     "comment",
+    "artwork_cache_id",
+    "artwork_checksum",
 ];
 
 const TEXT_KEYS: &[&str] = &[
@@ -161,6 +163,9 @@ fn validate_value(key: &str, value: &Value) -> Result<()> {
         "track_number" | "track_count" | "disc_count" => (0, 65535),
         "disc_number" => (1, 65535),
         "content_rating" => (0, 2),
+        // Both zero values together clear a track's own artwork
+        // registration; zero alone is a no-op for the checksum.
+        "artwork_cache_id" | "artwork_checksum" => (0, i64::from(u32::MAX)),
         _ => bail!("unsupported metadata edit item key {key}"),
     };
     ensure!(

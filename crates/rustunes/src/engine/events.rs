@@ -82,14 +82,14 @@ pub enum Event<'a> {
         file_bytes: u64,
     },
     /// One insert batch verified; `inserted` of `total` new tracks are on the
-    /// phone, and its session removed `removed` tracks. `inherited` of the
-    /// inserted tracks sent no cover yet show one the phone kept for the
-    /// internal item pid the insert reused.
+    /// phone, and its session removed `removed` tracks. `cleared` of the
+    /// inserted tracks sent no cover but inherited one the phone kept for the
+    /// internal item pid the insert reused; those registrations were cleared.
     InsertBatchVerified {
         inserted: usize,
         total: usize,
         removed: usize,
-        inherited: usize,
+        cleared: usize,
     },
     /// The plan's metadata updates of `tracks` tracks fit in `sessions`
     /// metadata batches, scheduled against the planning snapshot.
