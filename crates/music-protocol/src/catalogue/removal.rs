@@ -106,6 +106,18 @@ pub(crate) struct EmptiedAlbum {
     revision: Option<(i64, i64)>,
     removed_stats_revision: Option<i64>,
 }
+/// A group row whose only change since the session is the phone resolving its
+/// iTunes Store ID (from zero), with the group's live revision advancing above
+/// the session's highest tombstone. Observed for item artists and album
+/// artists after a removal on iOS 27.2.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct StoreIdResolution {
+    pub(crate) table: &'static str,
+    pub(crate) group_pid: i64,
+    pub(crate) class: i64,
+    pub(crate) revision_before: i64,
+    pub(crate) revision_after: i64,
+}
 /// A group row the session deleted because no item belongs to it any more.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct CollectedGroup {
@@ -141,6 +153,10 @@ pub struct RemovalReceipt {
     filled_phone_entries: Vec<i64>,
     removed_orphan_artwork_rows: u32,
     survivor_revision_refresh: Vec<RevisionRefresh>,
+    /// Group store ids the phone resolved after the session, with the live
+    /// revision it advanced above the session's highest tombstone.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    store_id_resolutions: Vec<StoreIdResolution>,
     emptied_albums: Vec<EmptiedAlbum>,
     /// Albums an earlier session left unevaluated that this one evaluated.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -541,8 +557,12 @@ fn verify_with(
         }
     }
     let mut representatives = Vec::new();
+    let mut store_id_resolutions = Vec::new();
+    // Baseline and observed live revision rows of every resolved group, held
+    // for the survivor comparison below.
+    let mut store_revisions = Vec::new();
     let mut emptied = BTreeSet::new();
-    for (name, key, _) in GROUPS {
+    for (name, key, class) in GROUPS {
         let mut members: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
         let mut touched = BTreeSet::new();
         for row in items.rows.keys() {
@@ -573,37 +593,78 @@ fn verify_with(
                 .with_context(|| format!("removal deleted {name} {id}"))?;
             let prior = typed::int(groups, row, "representative_item_pid")?;
             let now = typed::int(after_groups, now_row, "representative_item_pid")?;
-            if prior == now {
-                continue;
-            }
-            let surviving = members.get(&id);
-            let allowed = if removed.contains(&prior) {
-                surviving.map_or(now == 0, |s| s.contains(&now))
-            } else if name == "album" {
-                surviving.is_some_and(|s| s.contains(&now))
-            } else {
-                matches!(name, "album_artist" | "item_artist" | "genre")
-                    && !covered.contains(&prior)
-                    && surviving.and_then(|s| s.iter().find(|m| covered.contains(*m))) == Some(&now)
-            };
-            ensure!(
-                allowed,
-                "unqualified {name} {id} representative {prior} -> {now}"
-            );
             let mut desired = row.clone();
-            typed::set(
-                groups,
-                &mut desired,
-                "representative_item_pid",
-                Cell::Integer(now),
-            )?;
-            typed::replace(&mut expected, name, row, desired)?;
-            representatives.push(Representative {
-                table: name,
-                group_pid: id,
-                before: prior,
-                after: now,
-            });
+            let mut changed = false;
+            if prior != now {
+                let surviving = members.get(&id);
+                let allowed = if removed.contains(&prior) {
+                    surviving.map_or(now == 0, |s| s.contains(&now))
+                } else if name == "album" {
+                    surviving.is_some_and(|s| s.contains(&now))
+                } else {
+                    matches!(name, "album_artist" | "item_artist" | "genre")
+                        && !covered.contains(&prior)
+                        && surviving.and_then(|s| s.iter().find(|m| covered.contains(*m)))
+                            == Some(&now)
+                };
+                ensure!(
+                    allowed,
+                    "unqualified {name} {id} representative {prior} -> {now}"
+                );
+                typed::set(
+                    groups,
+                    &mut desired,
+                    "representative_item_pid",
+                    Cell::Integer(now),
+                )?;
+                representatives.push(Representative {
+                    table: name,
+                    group_pid: id,
+                    before: prior,
+                    after: now,
+                });
+                changed = true;
+            }
+            // The phone resolves an artist's iTunes Store ID after a session
+            // and advances its live revision with it. Observed for item artists
+            // and album artists; an album's revision has its own model
+            // (emptied and evaluated albums), and genres and composers have no
+            // store id column.
+            if matches!(name, "item_artist" | "album_artist") && groups.column("store_id").is_ok() {
+                let before_store = typed::int(groups, row, "store_id")?;
+                let after_store = typed::int(after_groups, now_row, "store_id")?;
+                if before_store != after_store {
+                    let (before_row, before_number) = live_group_revision(before, id, class)?;
+                    let (after_row, after_number) = live_group_revision(after, id, class)?;
+                    let mut resolution = before_row.clone();
+                    typed::set(
+                        table(before, "entity_revision")?,
+                        &mut resolution,
+                        "revision",
+                        Cell::Integer(after_number),
+                    )?;
+                    ensure!(
+                        before_store == 0
+                            && after_store != 0
+                            && after_number > highest
+                            && resolution == *after_row,
+                        "store id resolution for {name} {id} is unmodelled"
+                    );
+                    typed::set(groups, &mut desired, "store_id", Cell::Integer(after_store))?;
+                    store_id_resolutions.push(StoreIdResolution {
+                        table: name,
+                        group_pid: id,
+                        class,
+                        revision_before: before_number,
+                        revision_after: after_number,
+                    });
+                    store_revisions.push((before_row.clone(), after_row.clone()));
+                    changed = true;
+                }
+            }
+            if changed {
+                typed::replace(&mut expected, name, row, desired)?;
+            }
         }
     }
 
@@ -648,6 +709,19 @@ fn verify_with(
     for (_, row, _) in &keep_local {
         actual_revisions.rows.remove(row);
     }
+    // Hold the resolved groups at their baseline for the survivor comparison:
+    // their advance is the phone's, not the session's, and is taken below.
+    for (old, new) in &store_revisions {
+        ensure!(
+            actual_revisions.rows.remove(new) == Some(1)
+                && actual_revisions.rows.insert(old.clone(), 1).is_none(),
+            "store id resolution revision is not a replacement"
+        );
+    }
+    let store_numbers: BTreeSet<i64> = store_id_resolutions
+        .iter()
+        .map(|r| r.revision_after)
+        .collect();
     let (survivor_revision_refresh, album_revisions) = survivor_revision_refresh(
         expected
             .get_mut("entity_revision")
@@ -657,7 +731,12 @@ fn verify_with(
         &recomputed,
         highest,
         between_runs.is_some(),
+        &store_numbers,
     )?;
+    // The phone's store id resolution takes its observed live revision rows.
+    for (old, new) in store_revisions {
+        typed::replace(&mut expected, "entity_revision", &old, new)?;
+    }
     // Hero progress stays, follows the highest tombstone, or follows the
     // highest revision written at all: an emptied album's new revision lies
     // above the tombstones (observed).
@@ -668,7 +747,10 @@ fn verify_with(
         .fold(highest, i64::max);
     // A later run cannot tell the session's survivor refresh from the
     // phone's own renumbering since, so hero progress may stop anywhere
-    // above the tombstones the after state reaches.
+    // above the tombstones the after state reaches. The phone's store id
+    // resolution advances the artist image import revision to its highest
+    // resolved revision.
+    let store_high = store_id_resolutions.iter().map(|r| r.revision_after).max();
     let reached = |hero: i64| -> Result<bool> {
         let revisions = table(after, "entity_revision")?;
         for row in revisions.rows.keys() {
@@ -681,6 +763,7 @@ fn verify_with(
     ensure!(
         hero == highest
             || hero == written
+            || store_high == Some(hero)
             || hero == decimal(property(before, HERO)?, false)?
             || between_runs.is_some() && hero > highest && reached(hero)?,
         "removal hero revision progress differs"
@@ -735,6 +818,7 @@ fn verify_with(
         filled_phone_entries,
         removed_orphan_artwork_rows,
         survivor_revision_refresh,
+        store_id_resolutions,
         emptied_albums,
         evaluated_albums,
         collected_groups: collected,
@@ -1080,6 +1164,7 @@ fn survivor_revision_refresh(
     albums_recomputed: &BTreeSet<i64>,
     tombstone: i64,
     later: bool,
+    store_numbers: &BTreeSet<i64>,
 ) -> Result<(Vec<RevisionRefresh>, BTreeMap<i64, (i64, i64, Option<i64>)>)> {
     if expected.rows == actual.rows {
         return Ok((Vec::new(), BTreeMap::new()));
@@ -1114,7 +1199,7 @@ fn survivor_revision_refresh(
     // An emptied or late-evaluated album's live revision may advance, and its
     // stats revision row go with it; nothing else in it.
     let column = expected.column("revision")?;
-    let mut numbers = BTreeSet::new();
+    let mut numbers = store_numbers.clone();
     let mut albums = BTreeMap::new();
     let album_row = |t: &Table, id: i64, kind: i64| -> Result<Option<Row>> {
         let mut found = None;
@@ -1176,11 +1261,16 @@ fn survivor_revision_refresh(
     let mut changes = Vec::new();
     for (id, row) in &old {
         let now = &new[id];
+        // The phone's refresh is asynchronous: a capture may see none, some or
+        // all survivors renumbered. An unchanged survivor is exact.
+        if now == row {
+            continue;
+        }
         let before = typed::int(expected, row, "revision")?;
         let after = typed::int(actual, now, "revision")?;
         ensure!(
             after > before && numbers.insert(after),
-            "revision refresh must advance every survivor uniquely"
+            "revision refresh must advance a survivor uniquely"
         );
         let mut desired = row.clone();
         desired[column] = Cell::Integer(after);
@@ -1221,6 +1311,26 @@ fn contiguous(numbers: &BTreeSet<i64>, tombstone: i64) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The one live full-record revision row of a group entity, with its number.
+fn live_group_revision(tables: &Tables, id: i64, class: i64) -> Result<(Row, i64)> {
+    let revisions = table(tables, "entity_revision")?;
+    let mut found = None;
+    for (row, n) in &revisions.rows {
+        if typed::int(revisions, row, "entity_pid")? == id
+            && typed::int(revisions, row, "class")? == class
+            && typed::int(revisions, row, "revision_type")? == 0
+        {
+            ensure!(*n == 1 && found.is_none(), "duplicate live group revision");
+            ensure!(
+                typed::int(revisions, row, "deleted")? == 0,
+                "live group revision is a tombstone"
+            );
+            found = Some((row.clone(), typed::int(revisions, row, "revision")?));
+        }
+    }
+    found.with_context(|| format!("group {id} of class {class} has no live revision"))
 }
 
 fn table<'a>(tables: &'a Tables, name: &str) -> Result<&'a Table> {

@@ -114,6 +114,29 @@ fn a_later_run_absorbs_renumbering_after_the_sessions_own_refresh() {
 }
 
 #[test]
+fn a_later_run_absorbs_the_phones_store_id_resolution() {
+    // After the removal the phone resolved both artists' store ids and moved
+    // their live revisions above the tombstone; the artist image import
+    // revision followed the highest.
+    let both = "INSERT INTO entity_revision(revision,entity_pid,deleted,class,revision_type)VALUES(5,13,0,2,0),(6,21,0,7,0);";
+    let resolution = "UPDATE item_artist SET store_id=42 WHERE item_artist_pid=13;
+        UPDATE album_artist SET store_id=43 WHERE album_artist_pid=21;
+        UPDATE entity_revision SET revision=11 WHERE entity_pid=13 AND class=2 AND revision_type=0;
+        UPDATE entity_revision SET revision=12 WHERE entity_pid=21 AND class=7 AND revision_type=0;
+        UPDATE _MLDatabaseProperties SET value='12' WHERE key='MLArtistHeroImageImportDatabaseRevision';";
+    let (_f, before, after) = pair(both, resolution, false);
+    let receipt = serde_json::to_value(later(&before, &after).unwrap()).unwrap();
+    assert_eq!(receipt["store_id_resolutions"].as_array().unwrap().len(), 2);
+    // A store id change without the phone's revision advance is refused.
+    let (_f, before, after) = pair(
+        both,
+        "UPDATE item_artist SET store_id=42 WHERE item_artist_pid=13;",
+        false,
+    );
+    assert!(later(&before, &after).is_err());
+}
+
+#[test]
 fn a_later_run_refuses_what_listening_does_not_explain() {
     for sql in [
         "UPDATE item_extra SET title='Renamed' WHERE item_pid=2",

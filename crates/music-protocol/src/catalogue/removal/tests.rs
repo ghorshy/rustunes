@@ -827,6 +827,117 @@ fn a_later_run_still_models_what_the_session_wrote() {
     assert_eq!(receipt.removed(), 1);
 }
 
+/// Live full-record revisions for the fixture's item artist 13 and album
+/// artist 21, at their baseline numbers.
+const ARTIST_REVISIONS: &str = "
+    INSERT INTO entity_revision(revision,entity_pid,deleted,class,revision_type)VALUES(5,13,0,2,0),(6,21,0,7,0);";
+
+#[test]
+fn store_id_resolution_is_taken_from_the_phones_own_revision_advance() {
+    // iOS 27.2 resolved both artists' store ids after the removal and moved
+    // their live revisions above the highest tombstone.
+    let resolution = "UPDATE item_artist SET store_id=42 WHERE item_artist_pid=13;
+        UPDATE album_artist SET store_id=43 WHERE album_artist_pid=21;
+        UPDATE entity_revision SET revision=11 WHERE entity_pid=13 AND class=2 AND revision_type=0;
+        UPDATE entity_revision SET revision=12 WHERE entity_pid=21 AND class=7 AND revision_type=0;
+        UPDATE _MLDatabaseProperties SET value='12' WHERE key='MLArtistHeroImageImportDatabaseRevision';";
+    let pair = Pair::new(ARTIST_REVISIONS, resolution);
+    let (before, after) = pair.tables();
+    let receipt = verify(&before, &after, &[1], 10).unwrap();
+    assert_eq!(
+        receipt.store_id_resolutions,
+        vec![
+            StoreIdResolution {
+                table: "album_artist",
+                group_pid: 21,
+                class: 7,
+                revision_before: 6,
+                revision_after: 12,
+            },
+            StoreIdResolution {
+                table: "item_artist",
+                group_pid: 13,
+                class: 2,
+                revision_before: 5,
+                revision_after: 11,
+            },
+        ]
+    );
+    // A later run's rule sees the resolved rows already in the model.
+    let rule = |expected: &mut Tables, observed: &Tables, _floor: i64| {
+        let (modelled, actual) = (&expected["entity_revision"], &observed["entity_revision"]);
+        for (row, _) in &actual.rows {
+            let class = typed::int(actual, row, "class")?;
+            if matches!(class, 2 | 7) {
+                ensure!(
+                    modelled.rows.contains_key(row),
+                    "unmodelled class {class} revision"
+                );
+            }
+        }
+        Ok(Some(serde_json::json!({"checked": true})))
+    };
+    verify_later(&before, &after, &[1], 10, &rule).unwrap();
+    // Without the revision advance it is not the phone's resolution.
+    let pair = Pair::new(
+        ARTIST_REVISIONS,
+        "UPDATE item_artist SET store_id=42 WHERE item_artist_pid=13;",
+    );
+    let (before, after) = pair.tables();
+    assert!(verify(&before, &after, &[1], 10).is_err());
+    // Nor with any other changed cell.
+    let pair = Pair::new(
+        ARTIST_REVISIONS,
+        "UPDATE item_artist SET store_id=42,item_artist='Renamed' WHERE item_artist_pid=13;
+         UPDATE entity_revision SET revision=11 WHERE entity_pid=13 AND class=2 AND revision_type=0;",
+    );
+    let (before, after) = pair.tables();
+    assert!(verify(&before, &after, &[1], 10).is_err());
+    // Nor without a store id change.
+    let pair = Pair::new(
+        ARTIST_REVISIONS,
+        "UPDATE entity_revision SET revision=11 WHERE entity_pid=13 AND class=2 AND revision_type=0;",
+    );
+    let (before, after) = pair.tables();
+    assert!(verify(&before, &after, &[1], 10).is_err());
+}
+
+#[test]
+fn a_survivor_refresh_may_leave_survivors_unchanged() {
+    // The phone's refresh is asynchronous: item 2 advanced above the tombstone
+    // while items 3 and 4 kept theirs.
+    let pair = Pair::new(
+        "",
+        "UPDATE entity_revision SET revision=10 WHERE entity_pid=2 AND class=0 AND revision_type=0;
+         UPDATE _MLDatabaseProperties SET value='10' WHERE key='MLArtistHeroImageImportDatabaseRevision';",
+    );
+    let (before, after) = pair.tables();
+    let receipt = verify(&before, &after, &[1], 10).unwrap();
+    let refreshed: Vec<_> = receipt
+        .survivor_revision_refresh
+        .iter()
+        .map(|r| (r.item_pid, r.before, r.after))
+        .collect();
+    assert_eq!(refreshed, [(2, 2, 10)]);
+}
+
+#[test]
+fn store_id_resolution_and_a_survivor_refresh_share_the_contiguous_numbers() {
+    // The session refreshed the survivors to 10..12; the phone then resolved
+    // both artists' store ids to 13 and 14.
+    let resolution = "UPDATE entity_revision SET revision=entity_pid+8 WHERE deleted=0 AND class=0 AND revision_type=0;
+        UPDATE item_artist SET store_id=42 WHERE item_artist_pid=13;
+        UPDATE album_artist SET store_id=43 WHERE album_artist_pid=21;
+        UPDATE entity_revision SET revision=13 WHERE entity_pid=13 AND class=2 AND revision_type=0;
+        UPDATE entity_revision SET revision=14 WHERE entity_pid=21 AND class=7 AND revision_type=0;
+        UPDATE _MLDatabaseProperties SET value='14' WHERE key='MLArtistHeroImageImportDatabaseRevision';";
+    let pair = Pair::new(ARTIST_REVISIONS, resolution);
+    let (before, after) = pair.tables();
+    let receipt = verify(&before, &after, &[1], 10).unwrap();
+    assert_eq!(receipt.survivor_revision_refresh.len(), 3);
+    assert_eq!(receipt.store_id_resolutions.len(), 2);
+}
+
 #[test]
 fn a_later_run_recognises_an_unapplied_session_whose_target_was_played() {
     let fixture = Fixture::new();
