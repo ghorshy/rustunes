@@ -90,6 +90,22 @@ pub(crate) fn event(event: &Event<'_>) -> Result<()> {
         Event::Device(crate::engine::execution::device::Event::PairingRecordAvailable) => {
             notice("pairing_record_available", Info, line()?, json!({}))
         }
+        Event::Device(crate::engine::execution::device::Event::TransportChanged {
+            from,
+            to,
+            batch,
+        }) => {
+            let connection = |transport| match transport {
+                crate::engine::execution::device::Transport::Usb => "usb",
+                crate::engine::execution::device::Transport::Wifi(_) => "wifi",
+            };
+            notice(
+                "transport_changed",
+                Info,
+                line()?,
+                json!({"from": connection(*from), "to": connection(*to), "batch": batch}),
+            )
+        }
         Event::RunEvidence(run) => {
             notice("run_directory", Info, line()?, json!({"path": path(run)}))
         }

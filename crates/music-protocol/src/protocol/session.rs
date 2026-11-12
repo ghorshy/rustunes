@@ -499,10 +499,41 @@ impl Channel {
             if string(root, "Command")? != "Ping" {
                 return Ok(value);
             }
-            let mut pong = Dictionary::new();
-            pong.insert("Session".into(), number(root, "Session")?.into());
-            pong.insert("Command".into(), "Pong".into());
-            self.send(&Value::Dictionary(pong)).await?;
+            self.send(&pong(root)?).await?;
+        }
+    }
+
+    /// The next non-Ping message, answering any Ping, within the window `end`
+    /// and with a `quiet` bound on every single read. The phone pings an idle
+    /// link every 13–16 s, so a read that waits `quiet` for its next frame
+    /// means the port stalled — even when the mux daemon keeps this client's
+    /// socket open (netmuxd does; stock usbmuxd closes it). Returns `Ok(None)`
+    /// when the window passes with the link still talking.
+    async fn receive_within(&mut self, end: Instant, quiet: Duration) -> Result<Option<Value>> {
+        loop {
+            let now = Instant::now();
+            if now >= end {
+                return Ok(None);
+            }
+            self.deadline = end.min(now + quiet);
+            let value = match self.receive_inner().await {
+                Ok(value) => value,
+                Err(error) => {
+                    self.client.discard_bounded();
+                    if Instant::now() >= end {
+                        return Ok(None);
+                    }
+                    return Err(error);
+                }
+            };
+            // A completed frame leaves the rest of the window for answering a
+            // Ping and for the next read's bound, not just `quiet`.
+            self.deadline = end;
+            let root = dictionary(&value)?;
+            if string(root, "Command")? != "Ping" {
+                return Ok(Some(value));
+            }
+            self.send(&pong(root)?).await?;
         }
     }
 
@@ -736,15 +767,21 @@ impl Link {
     /// short cannot be resumed, so the caller drops the link either way, as
     /// it must after the phone stalls the port.
     pub async fn wait_lost(&mut self, window: Duration) -> bool {
-        let deadline = Instant::now() + window;
+        self.wait_lost_with_quiet(window, window).await
+    }
+
+    /// As `wait_lost`, but also reports a lost link when the phone has sent
+    /// nothing for `quiet`. The phone pings an idle link every 13–16 s, so
+    /// prolonged silence means the port stalled even when the mux daemon
+    /// leaves this client's socket open (netmuxd does; usbmuxd closes it).
+    /// `quiet` must be positive and no longer than `window`.
+    pub async fn wait_lost_with_quiet(&mut self, window: Duration, quiet: Duration) -> bool {
+        let end = Instant::now() + window;
         loop {
-            // The channel's own read bound stays just behind this wait, so
-            // the wait ends on its window rather than on a read deadline.
-            self.channel.deadline = deadline + Duration::from_secs(1);
-            match timeout_at(deadline, self.channel.receive()).await {
-                Err(_) => return false,
-                Ok(Err(_)) => return true,
-                Ok(Ok(_)) => {}
+            match self.channel.receive_within(end, quiet).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return false,
+                Err(_) => return true,
             }
         }
     }
@@ -1663,6 +1700,13 @@ fn dictionary(value: &Value) -> Result<&Dictionary> {
 }
 fn child<'a>(parent: &'a Dictionary, key: &str) -> Result<&'a Dictionary> {
     dictionary(parent.get(key).with_context(|| format!("missing {key}"))?)
+}
+/// The Pong that answers a Ping in the ping's own session.
+fn pong(root: &Dictionary) -> Result<Value> {
+    let mut pong = Dictionary::new();
+    pong.insert("Session".into(), number(root, "Session")?.into());
+    pong.insert("Command".into(), "Pong".into());
+    Ok(Value::Dictionary(pong))
 }
 fn string<'a>(parent: &'a Dictionary, key: &str) -> Result<&'a str> {
     parent

@@ -818,6 +818,8 @@ pub(crate) async fn send_metadata_only<T: StartedOperation>(
             provider.udid == current.device,
             "discovered device differs from the captured state"
         );
+        let transport = provider.transport();
+        link.expect_transport(transport);
         let afc = afc.insert(
             Transfer::connect_bounded(
                 &provider,
@@ -831,7 +833,7 @@ pub(crate) async fn send_metadata_only<T: StartedOperation>(
         guard(afc, &state, artwork.len() as u64, artwork_sha).await?;
         control.check()?;
         let live = session.insert(
-            link.begin(session_prepared, send, &current.device, control)
+            link.begin(session_prepared, send, &current.device, transport, control)
                 .await?,
         );
         guard(afc, &state, artwork.len() as u64, artwork_sha).await?;
@@ -915,6 +917,7 @@ pub(crate) async fn remove_all(
             removed,
             total: tracks.len(),
         })?;
+        let _batch = device::enter_batch(number + 1);
         let mut attempt = 1;
         let batch = loop {
             let control = control();

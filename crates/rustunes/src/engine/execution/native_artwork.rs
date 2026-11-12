@@ -245,6 +245,8 @@ where
             provider.udid == state.common.device_identifier(),
             "discovered device differs from prepared artwork state"
         );
+        let transport = provider.transport();
+        link.expect_transport(transport);
         let mut afc = Transfer::connect_bounded(
             &provider,
             update.trace,
@@ -261,6 +263,7 @@ where
                 session_prepared,
                 update.trace,
                 state.common.device_identifier(),
+                transport,
                 control,
             )
             .await?;

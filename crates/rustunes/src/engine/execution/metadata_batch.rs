@@ -712,6 +712,7 @@ pub(crate) async fn update_all(
     let mut tracks = 0;
     let mut planned_sessions = 0;
     for session in 1..=MAX_SESSIONS + 1 {
+        let _batch = crate::engine::execution::device::enter_batch(session);
         let control = control();
         let (identity, before) = removal_batch::capture_fresh(
             &directory.join(format!("session-{session:03}")),

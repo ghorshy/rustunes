@@ -356,6 +356,55 @@ fn syslog_filter_keeps_sync_services_without_matching_watch_or_batch() {
 }
 
 #[test]
+fn transport_modes_keep_the_legacy_flags_and_refuse_contradictions() {
+    let configured = |args: &[&str]| {
+        let cli = Cli::try_parse_from([&["rustunes"][..], args].concat()).unwrap();
+        super::device_config(&cli).map(|config| config.command_options())
+    };
+    assert_eq!(configured(&["sync"]).unwrap(), "");
+    assert_eq!(configured(&["sync", "--transport", "usb"]).unwrap(), "");
+    assert_eq!(configured(&["sync", "--wifi"]).unwrap(), " --wifi");
+    assert_eq!(
+        configured(&["sync", "--wifi-address", "192.0.2.7"]).unwrap(),
+        " --wifi-address 192.0.2.7"
+    );
+    assert_eq!(
+        configured(&["sync", "--transport", "wifi"]).unwrap(),
+        " --wifi"
+    );
+    assert_eq!(
+        configured(&["sync", "--transport", "wifi", "--wifi-address", "192.0.2.7"]).unwrap(),
+        " --wifi-address 192.0.2.7"
+    );
+    // `auto` chooses again in the next command, so it prints no connection.
+    assert_eq!(configured(&["sync", "--transport", "auto"]).unwrap(), "");
+    assert_eq!(
+        configured(&["sync", "--transport", "auto", "--wifi-address", "192.0.2.7"]).unwrap(),
+        ""
+    );
+    // `--wifi-address` pins the fallback; `--wifi` and `--transport usb`
+    // contradict `auto` and `--transport usb` contradicts legacy Wi-Fi.
+    assert!(
+        configured(&["sync", "--transport", "auto", "--wifi"])
+            .unwrap_err()
+            .to_string()
+            .contains("--transport auto")
+    );
+    assert!(
+        configured(&["sync", "--transport", "usb", "--wifi"])
+            .unwrap_err()
+            .to_string()
+            .contains("--transport usb")
+    );
+    assert!(
+        configured(&["sync", "--transport", "usb", "--wifi-address", "192.0.2.7"])
+            .unwrap_err()
+            .to_string()
+            .contains("--transport usb")
+    );
+}
+
+#[test]
 fn wifi_finds_the_phone_first_only_for_commands_that_reach_it() {
     let reaches = |args: &[&str]| {
         let cli = Cli::try_parse_from([&["rustunes", "--wifi"], args].concat()).unwrap();

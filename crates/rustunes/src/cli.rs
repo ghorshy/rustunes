@@ -59,9 +59,16 @@ struct Cli {
     #[arg(long, global = true)]
     wifi: bool,
     /// Reach the phone over Wi-Fi at this address instead of finding it by
-    /// Bonjour; implies --wifi.
+    /// Bonjour; implies --wifi. With --transport auto it pins the Wi-Fi
+    /// fallback address.
     #[arg(long, global = true, value_name = "IP")]
     wifi_address: Option<std::net::IpAddr>,
+    /// How to reach the phone: `usb` (the default), `wifi`, or `auto` (USB
+    /// when the phone is connected, Wi-Fi otherwise). `auto` decides again
+    /// before every batch, so plugging the cable in speeds up the rest of the
+    /// run and unplugging it falls back to Wi-Fi.
+    #[arg(long, global = true, value_enum, value_name = "TRANSPORT")]
+    transport: Option<TransportChoice>,
     /// Copy every track's audio from the phone when indexing it, instead of
     /// reusing cached fingerprints of files whose size and times are unchanged,
     /// and hash every local source again. Slow (minutes per pass); refreshes
@@ -103,6 +110,17 @@ enum MessageFormat {
     Human,
     /// One JSON record per line on stdout.
     Json,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum TransportChoice {
+    /// USB only (the default).
+    Usb,
+    /// Wi-Fi only.
+    Wifi,
+    /// USB when the phone is connected, otherwise Wi-Fi, decided again before
+    /// every batch.
+    Auto,
 }
 
 #[derive(Subcommand)]
@@ -700,9 +718,21 @@ async fn run_parsed(cli: Cli) -> Result<ExitCode> {
     if let Ok(state) = default_state_directory() {
         source_reads::persist(state.join("source-cache"), !cli.full_readback);
     }
-    let find_first = (cli.wifi || cli.wifi_address.is_some()) && reaches_phone(&cli.command);
+    let auto = matches!(cli.transport, Some(TransportChoice::Auto));
+    let find_first = (cli.wifi
+        || cli.wifi_address.is_some()
+        || matches!(
+            cli.transport,
+            Some(TransportChoice::Wifi | TransportChoice::Auto)
+        ))
+        && reaches_phone(&cli.command);
     if find_first && machine::enabled() {
-        machine::phase("find_device", Some("Finding the phone over Wi-Fi".into()))?;
+        let line = if auto {
+            "Finding the phone".into()
+        } else {
+            "Finding the phone over Wi-Fi".into()
+        };
+        machine::phase("find_device", Some(line))?;
     }
     if find_first && let Some((path, options)) = sources_to_warm(&cli.command) {
         // Finding and holding the phone takes seconds of waiting; the sources
@@ -721,7 +751,11 @@ async fn run_parsed(cli: Cli) -> Result<ExitCode> {
             // later operations allow for discovery; they reuse what it found.
             timeout(WIFI_DISCOVERY, device::provider())
                 .await
-                .context("timed out finding the phone over Wi-Fi")??;
+                .context(if auto {
+                    "timed out finding the phone"
+                } else {
+                    "timed out finding the phone over Wi-Fi"
+                })??;
         }
         // Boxed: the commands nest futures deeper than the compiler's layout
         // query limit allows when the binary lays out the whole run.
@@ -917,14 +951,23 @@ fn reaches_phone(command: &Command) -> bool {
     )
 }
 
-/// USB unless --wifi or --wifi-address chose Wi-Fi.
+/// USB unless --wifi, --wifi-address or --transport chose another mode.
 fn device_config(cli: &Cli) -> Result<engine::DeviceConfig> {
     let config = usb_config(cli.device.clone())?;
-    Ok(if cli.wifi || cli.wifi_address.is_some() {
-        config.over_wifi(cli.wifi_address, wifi_memory())
-    } else {
-        config
-    })
+    let legacy_wifi = cli.wifi || cli.wifi_address.is_some();
+    match cli.transport {
+        Some(TransportChoice::Auto) if cli.wifi => bail!(
+            "--transport auto already falls back to Wi-Fi; do not combine it with --wifi (use --wifi-address to pin the fallback)"
+        ),
+        Some(TransportChoice::Usb) if legacy_wifi => {
+            bail!("--transport usb cannot be combined with --wifi or --wifi-address")
+        }
+        Some(TransportChoice::Wifi) => Ok(config.over_wifi(cli.wifi_address, wifi_memory())),
+        Some(TransportChoice::Auto) => Ok(config.auto(cli.wifi_address, wifi_memory())),
+        Some(TransportChoice::Usb) => Ok(config),
+        None if legacy_wifi => Ok(config.over_wifi(cli.wifi_address, wifi_memory())),
+        None => Ok(config),
+    }
 }
 /// Where the phone's last Wi-Fi address is remembered.
 pub(crate) fn wifi_memory() -> Option<PathBuf> {

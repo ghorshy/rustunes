@@ -111,6 +111,7 @@ async fn offline_configuration_keeps_socket_validation_at_discovery_boundary() {
 async fn wifi_is_chosen_only_by_explicit_configuration() {
     scope(Config::default(), async {
         assert!(wifi_config().unwrap().is_none());
+        assert_eq!(mode().unwrap(), Mode::Usb);
     })
     .await;
     let address: IpAddr = "192.0.2.16".parse().unwrap();
@@ -126,9 +127,127 @@ async fn wifi_is_chosen_only_by_explicit_configuration() {
             Some(Path::new("/tmp/remembered"))
         );
         assert_eq!(selection().unwrap().as_deref(), Some("PHONE"));
+        assert_eq!(mode().unwrap(), Mode::Wifi);
         assert!(found().unwrap().is_none());
     })
     .await;
+}
+
+#[tokio::test]
+async fn auto_keeps_wifi_for_fallback_but_prints_no_connection_option() {
+    let address: IpAddr = "192.0.2.16".parse().unwrap();
+    let config = Config::new(Some("PHONE".into()), None)
+        .unwrap()
+        .auto(Some(address), Some("/tmp/remembered".into()));
+    assert_eq!(config.command_options(), "");
+    scope(config, async move {
+        assert_eq!(mode().unwrap(), Mode::Auto);
+        let wifi = wifi_config().unwrap().unwrap();
+        assert_eq!(wifi.address, Some(address));
+        assert_eq!(
+            wifi.remembered.as_deref(),
+            Some(Path::new("/tmp/remembered"))
+        );
+    })
+    .await;
+}
+
+#[test]
+fn auto_usb_uses_the_run_phone_and_treats_a_missing_one_as_absent() {
+    // USB has no device: Wi-Fi may take over.
+    assert!(auto_usb_device(Vec::new(), None).unwrap().is_none());
+    assert!(
+        auto_usb_device(Vec::new(), Some("PHONE"))
+            .unwrap()
+            .is_none()
+    );
+    // One USB device without --device, or the selected one among several.
+    let only = vec![row("ONLY", 1, Connection::Usb)];
+    assert_eq!(auto_usb_device(only, None).unwrap().unwrap().udid, "ONLY");
+    let several = vec![
+        row("AAAA", 1, Connection::Usb),
+        row("BBBB", 2, Connection::Usb),
+    ];
+    assert_eq!(
+        auto_usb_device(several.clone(), Some("BBBB"))
+            .unwrap()
+            .unwrap()
+            .udid,
+        "BBBB"
+    );
+    // A selected phone absent from the USB list is absent, not another phone.
+    assert!(auto_usb_device(several, Some("CCCC")).unwrap().is_none());
+    // Several USB phones with no selection are ambiguous: no fallback guesses.
+    assert!(
+        auto_usb_device(
+            vec![
+                row("AAAA", 1, Connection::Usb),
+                row("BBBB", 2, Connection::Usb)
+            ],
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("multiple USB Apple devices")
+    );
+}
+
+#[test]
+fn auto_names_both_transports_when_neither_found_the_phone() {
+    let usb = anyhow::anyhow!("connecting to usbmuxd, which is not running");
+    let wifi = anyhow::anyhow!("no paired iPhone answered over Wi-Fi");
+    let error = format!("{:#}", no_transport(None, Some(usb), &wifi));
+    assert!(error.contains("USB: connecting to usbmuxd, which is not running"));
+    assert!(error.contains("Wi-Fi: no paired iPhone answered over Wi-Fi"));
+    let error = format!(
+        "{:#}",
+        no_transport(Some("PHONE"), None, &anyhow::anyhow!("no answer"))
+    );
+    assert!(error.contains("USB: PHONE is not connected over USB"));
+}
+
+#[tokio::test]
+async fn transport_changes_are_reported_once_per_change_with_the_batch() {
+    let address: IpAddr = "192.0.2.16".parse().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    scope_with_observer(
+        Config::default(),
+        move |event| {
+            sink.lock().unwrap().push(event);
+            Ok(())
+        },
+        async move {
+            note_transport(Transport::Usb).unwrap();
+            note_transport(Transport::Usb).unwrap();
+            let batch = enter_batch(5);
+            note_transport(Transport::Wifi(address)).unwrap();
+            note_transport(Transport::Usb).unwrap();
+            drop(batch);
+            note_transport(Transport::Wifi(address)).unwrap();
+        },
+    )
+    .await;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            Event::TransportChanged {
+                from: Transport::Usb,
+                to: Transport::Wifi(address),
+                batch: Some(5),
+            },
+            Event::TransportChanged {
+                from: Transport::Wifi(address),
+                to: Transport::Usb,
+                batch: Some(5),
+            },
+            Event::TransportChanged {
+                from: Transport::Usb,
+                to: Transport::Wifi(address),
+                batch: None,
+            },
+        ]
+    );
 }
 
 #[test]

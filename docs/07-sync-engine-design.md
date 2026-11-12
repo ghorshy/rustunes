@@ -1379,11 +1379,15 @@ send has no cover record; its cover is kept on the phone but not verified.
 
 DESIGN, CONFIRMED. The ATC and AFC protocols are unchanged over TCP once
 Lockdown and the pairing record provide TLS (chapter 03). The engine selects
-the transport at one point (`--wifi`, `--wifi-address IP`), and everything
-above it, including the journal, planning, verification and recovery, is the
-same. Wi-Fi uses the same pairing record that the USB multiplexer saved when
-the phone was paired over USB. The tool does not require netmuxd, avahi or any
-system daemon. DESIGN: the project adds crates, never system packages.
+the transport at one point (`--wifi`, `--wifi-address IP`, or `--transport
+auto`), and everything above it, including the journal, planning, verification
+and recovery, is the same. `auto` decides again at every provider lookup, which
+is once per batch: USB when it lists the run's phone, otherwise Wi-Fi. A
+transfer error inside a batch never changes transport; the batch fails and
+`resume` observes it. Wi-Fi uses the same pairing record that the USB
+multiplexer saved when the phone was paired over USB. The tool does not require
+netmuxd, avahi or any system daemon. DESIGN: the project adds crates, never
+system packages.
 
 ### 8.2 Discovery
 
@@ -1395,10 +1399,12 @@ system daemon. DESIGN: the project adds crates, never system packages.
 - It then confirms that a paired session reports the record's device
   identifier before any other connection is made.
 - The tool remembers each phone's last address.
-- One discovery per command. An engine step that runs inside another with the
-  same configuration shares the phone the outer one found and holds, which
-  saves about 7 s a step. Over Wi-Fi, `sync` reads its sources while the phone
-  is being found and held.
+- One discovery per command; `--transport auto` lists USB again at every
+  provider lookup (once per batch) before falling back to the Wi-Fi phone it
+  already found. An engine step that runs inside another with the same
+  configuration shares the phone the outer one found and holds, which saves
+  about 7 s a step. Over Wi-Fi, `sync` reads its sources while the phone is
+  being found and held.
 
 ### 8.3 Keeping the phone awake
 
@@ -1860,7 +1866,7 @@ sync captures the phone's state before each batch, so it moves between
 
 | Phase | What happens |
 |-------|--------------|
-| `find_device` | Finding and waking the phone over Wi-Fi (`--wifi`, `--wifi-address`; up to 90 s). |
+| `find_device` | Finding and waking the phone (`--wifi`, `--wifi-address`, or `--transport auto`; up to 90 s). |
 | `capture_device` | Copying the phone's Music catalogue for a complete, read-only snapshot. |
 | `index_audio` | Identifying each track's audio on the phone: cached fingerprints are reused; changed or new files are copied. |
 | `read_snapshot` | Reading a saved snapshot instead of the phone. |

@@ -1,6 +1,8 @@
 //! Discovery over USB (usbmuxd) or Wi-Fi (Bonjour and a direct TCP
-//! connection). Selection is fixed before the first provider lookup; pairing
-//! records are read, never created or repaired by this module.
+//! connection). USB is the default; `--wifi` fixes Wi-Fi for the whole
+//! command, while `--transport auto` decides again at every provider lookup
+//! (once per batch). Pairing records are read, never created or repaired by
+//! this module.
 mod lock;
 mod wifi;
 
@@ -28,6 +30,15 @@ use std::{
 
 const MAX_DEVICES: usize = 256;
 const LABEL: &str = "rustunes";
+/// How the phone is reached. `Auto` tries USB at every lookup and falls back
+/// to Wi-Fi only when USB discovery finds nothing to use.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Mode {
+    #[default]
+    Usb,
+    Wifi,
+    Auto,
+}
 /// Explicit local discovery configuration: USB unless Wi-Fi is chosen.
 /// Environment resolution belongs to the caller; no lookup occurs until a
 /// scoped operation requests a provider.
@@ -35,6 +46,7 @@ const LABEL: &str = "rustunes";
 pub struct Config {
     selected: Option<String>,
     socket: Option<OsString>,
+    mode: Mode,
     wifi: Option<WifiConfig>,
     locks: Option<PathBuf>,
 }
@@ -54,13 +66,18 @@ impl Config {
     /// that the phone's identifier is never printed; with several phones
     /// attached, the printed command then asks for it.
     pub(crate) fn command_options(&self) -> String {
-        match &self.wifi {
-            None => String::new(),
-            Some(WifiConfig {
-                address: Some(address),
-                ..
-            }) => format!(" --wifi-address {address}"),
-            Some(_) => " --wifi".into(),
+        match (self.mode, &self.wifi) {
+            (
+                Mode::Wifi,
+                Some(WifiConfig {
+                    address: Some(address),
+                    ..
+                }),
+            ) => format!(" --wifi-address {address}"),
+            (Mode::Wifi, Some(_)) => " --wifi".into(),
+            // `auto` chooses again in the next command; there is no flag that
+            // would preserve a transport chosen for this one.
+            _ => String::new(),
         }
     }
     pub fn new(selected: Option<String>, socket: Option<OsString>) -> Result<Self> {
@@ -72,6 +89,7 @@ impl Config {
         Ok(Self {
             selected,
             socket,
+            mode: Mode::Usb,
             wifi: None,
             locks: None,
         })
@@ -86,6 +104,21 @@ impl Config {
             pairing_records: wifi::PAIRING_RECORDS.into(),
             remembered,
         });
+        self.mode = Mode::Wifi;
+        self
+    }
+    /// Try USB first and Wi-Fi only when USB discovery finds no phone to use.
+    /// The choice is made at every provider lookup, so a cable plugged or
+    /// unplugged between batches changes the transport without restarting the
+    /// run. `address` pins the Wi-Fi fallback; otherwise Bonjour and the
+    /// phone's last address are used.
+    pub fn auto(mut self, address: Option<IpAddr>, remembered: Option<PathBuf>) -> Self {
+        self.wifi = Some(WifiConfig {
+            address,
+            pairing_records: wifi::PAIRING_RECORDS.into(),
+            remembered,
+        });
+        self.mode = Mode::Auto;
         self
     }
     /// Lock each phone a run reaches with a file in `directory`, so that no
@@ -105,10 +138,18 @@ pub enum Transport {
 pub enum Event {
     DeviceDetected(Transport),
     PairingRecordAvailable,
+    /// `auto` moved the run between transports before `batch`, if it is
+    /// known; a change outside a batch has no number.
+    TransportChanged {
+        from: Transport,
+        to: Transport,
+        batch: Option<usize>,
+    },
 }
 struct Scope {
     selected: Option<String>,
     socket: Option<OsString>,
+    mode: Mode,
     wifi: Option<WifiConfig>,
     /// The phone found over Wi-Fi, reused by later lookups in this scope and
     /// in nested scopes of the same configuration. Its heartbeat stops when
@@ -117,6 +158,11 @@ struct Scope {
     /// The latest complete index snapshot captured in this scope, shared the
     /// same way.
     snapshot: Arc<Mutex<Option<PathBuf>>>,
+    /// The transport the last provider lookup used, and the batch number a
+    /// change is attributed to. Shared with nested scopes of one
+    /// configuration so a run logs one line per change.
+    transport: Arc<Mutex<Option<Transport>>>,
+    batch: Arc<Mutex<Option<usize>>>,
     /// Where each phone this scope reaches is locked, if anywhere.
     locks: Option<PathBuf>,
     observer: Box<dyn Fn(Event) -> Result<()> + Send + Sync>,
@@ -136,24 +182,32 @@ pub async fn scope_with_observer<F: std::future::Future>(
     let mut selected = config.selected.clone();
     let mut found = Arc::default();
     let mut snapshot = Arc::default();
+    let mut transport = Arc::default();
+    let mut batch = Arc::default();
     // An engine nested in the same configuration keeps the phone its caller
     // already found and holds awake (discovering it again repeats the wake,
-    // Lockdown confirmation and hold), and its latest snapshot.
-    if let Ok(Some((outer_selected, outer_found, outer_snapshot))) =
+    // Lockdown confirmation and hold), its latest snapshot, and its transport
+    // log.
+    if let Ok(Some((outer_selected, outer_found, outer_snapshot, outer_transport, outer_batch))) =
         CURRENT.try_with(|outer| outer.shared(&config))
     {
         selected = outer_selected;
         found = outer_found;
         snapshot = outer_snapshot;
+        transport = outer_transport;
+        batch = outer_batch;
     }
     CURRENT
         .scope(
             Scope {
                 selected,
                 socket: config.socket,
+                mode: config.mode,
                 wifi: config.wifi,
                 found,
                 snapshot,
+                transport,
+                batch,
                 locks: config.locks,
                 observer: Box::new(observer),
             },
@@ -165,12 +219,14 @@ type Shared = (
     Option<String>,
     Arc<Mutex<Option<wifi::Found>>>,
     Arc<Mutex<Option<PathBuf>>>,
+    Arc<Mutex<Option<Transport>>>,
+    Arc<Mutex<Option<usize>>>,
 );
 impl Scope {
     /// What a nested scope of `config` inherits: only a scope of the same
     /// transport whose selection the nested one does not contradict.
     fn shared(&self, config: &Config) -> Option<Shared> {
-        if self.wifi != config.wifi || self.socket != config.socket {
+        if self.mode != config.mode || self.wifi != config.wifi || self.socket != config.socket {
             return None;
         }
         if config.selected.is_some() && self.selected != config.selected {
@@ -180,6 +236,8 @@ impl Scope {
             self.selected.clone(),
             Arc::clone(&self.found),
             Arc::clone(&self.snapshot),
+            Arc::clone(&self.transport),
+            Arc::clone(&self.batch),
         ))
     }
 }
@@ -208,6 +266,59 @@ fn selection() -> Result<Option<String>> {
     CURRENT
         .try_with(|scope| scope.selected.clone())
         .context("device configuration scope is required")
+}
+fn mode() -> Result<Mode> {
+    CURRENT
+        .try_with(|scope| scope.mode)
+        .context("device configuration scope is required")
+}
+/// Name the batch that a transport change happened before, until dropped.
+/// Nested batches restore the number of the batch around them.
+pub(crate) struct BatchNumber(Option<usize>);
+pub(crate) fn enter_batch(number: usize) -> BatchNumber {
+    let previous = CURRENT
+        .try_with(|scope| scope.batch.lock().ok().map(|mut slot| slot.replace(number)))
+        .ok()
+        .flatten()
+        .flatten();
+    BatchNumber(previous)
+}
+impl Drop for BatchNumber {
+    fn drop(&mut self) {
+        let _ = CURRENT.try_with(|scope| {
+            if let Ok(mut slot) = scope.batch.lock() {
+                *slot = self.0;
+            }
+        });
+    }
+}
+/// Record the transport this lookup used, reporting a change once.
+fn note_transport(transport: Transport) -> Result<()> {
+    let (previous, batch) = CURRENT
+        .try_with(|scope| -> Result<_> {
+            let mut last = scope
+                .transport
+                .lock()
+                .map_err(|_| anyhow::anyhow!("transport log lock poisoned"))?;
+            let previous = *last;
+            *last = Some(transport);
+            let batch = *scope
+                .batch
+                .lock()
+                .map_err(|_| anyhow::anyhow!("batch state lock poisoned"))?;
+            Ok((previous, batch))
+        })
+        .context("device configuration scope is required")??;
+    if let Some(previous) = previous
+        && previous != transport
+    {
+        emit(Event::TransportChanged {
+            from: previous,
+            to: transport,
+            batch,
+        })?;
+    }
+    Ok(())
 }
 /// Lock the phone `udid` for the rest of this process, where the scope's
 /// configuration says.
@@ -327,17 +438,26 @@ fn select_device(mut devices: Vec<UsbmuxdDevice>, selected: Option<&str>) -> Res
 }
 /// The selected phone over the configured transport.
 pub async fn provider() -> Result<DeviceProvider> {
-    let provider = match wifi_config()? {
-        None => usb_provider().await,
-        Some(config) => wifi_provider(&config).await,
+    let provider = match mode()? {
+        Mode::Usb => usb_provider().await,
+        Mode::Wifi => {
+            let config = wifi_config()?.context("Wi-Fi configuration is required")?;
+            wifi_provider(&config).await
+        }
+        Mode::Auto => auto_provider().await,
     }?;
     crate::engine::state::audio_index::cache::phone_selected(&provider.udid);
+    note_transport(provider.transport())?;
     Ok(provider)
 }
 async fn usb_provider() -> Result<DeviceProvider> {
     let selected = selection()?;
     let address = address()?;
     let device = select_device(enumerate(&address).await?, selected.as_deref())?;
+    usb_provider_for(device, address).await
+}
+/// Use a USB device that discovery already selected.
+async fn usb_provider_for(device: UsbmuxdDevice, address: UsbmuxdAddr) -> Result<DeviceProvider> {
     emit(Event::DeviceDetected(Transport::Usb))?;
     lock_phone(&device.udid)?;
     let provider = device.to_provider(address, LABEL);
@@ -361,6 +481,59 @@ async fn usb_provider() -> Result<DeviceProvider> {
         }
     }
     Ok(DeviceProvider::usb(provider))
+}
+/// USB when it has the phone this run may use, otherwise Wi-Fi. A USB
+/// discovery failure (no daemon, no device, or the selected device absent)
+/// falls back; a pairing or connection failure after USB found the device does
+/// not, because the transport choice is not a retry of a failed operation.
+async fn auto_provider() -> Result<DeviceProvider> {
+    let selected = selection()?;
+    let address = address()?;
+    let usb = match enumerate(&address).await {
+        Ok(devices) => match auto_usb_device(devices, selected.as_deref())? {
+            Some(device) => return usb_provider_for(device, address).await,
+            None => None,
+        },
+        Err(error) => Some(error),
+    };
+    let config = wifi_config()?.context("auto transport requires Wi-Fi settings")?;
+    match wifi_provider(&config).await {
+        Ok(provider) => Ok(provider),
+        Err(wifi_error) => Err(no_transport(selected.as_deref(), usb, &wifi_error)),
+    }
+}
+/// Name both transports and why each failed when `auto` found neither.
+fn no_transport(
+    selected: Option<&str>,
+    usb: Option<anyhow::Error>,
+    wifi: &anyhow::Error,
+) -> anyhow::Error {
+    let usb = usb
+        .map(|error| format!("{error:#}"))
+        .unwrap_or_else(|| match selected {
+            Some(selected) => format!("{selected} is not connected over USB"),
+            None => "no iPhone listed by usbmuxd over USB".into(),
+        });
+    anyhow::anyhow!("no iPhone reachable over USB or Wi-Fi\nUSB: {usb}\nWi-Fi: {wifi:#}")
+}
+/// The USB device `auto` may use, or `None` when USB has none. Several USB
+/// devices with no `--device` are ambiguous rather than absent, so they stop
+/// the lookup instead of falling back to a possibly different phone.
+fn auto_usb_device(
+    mut devices: Vec<UsbmuxdDevice>,
+    selected: Option<&str>,
+) -> Result<Option<UsbmuxdDevice>> {
+    if let Some(selected) = selected {
+        return Ok(devices
+            .iter()
+            .position(|device| device.udid == selected)
+            .map(|index| devices.swap_remove(index)));
+    }
+    ensure!(
+        devices.len() <= 1,
+        "multiple USB Apple devices connected; select the intended device with --device UDID"
+    );
+    Ok(devices.pop())
 }
 /// Whether this run has logged the phone's model and iOS version.
 static DESCRIBED: AtomicBool = AtomicBool::new(false);
@@ -435,18 +608,52 @@ pub struct Listed {
     pub transport: Transport,
 }
 /// USB devices from usbmuxd, or paired phones answering Bonjour over Wi-Fi.
+/// `auto` lists both, preferring a USB entry when a phone answers on both.
 pub async fn devices() -> Result<Vec<Listed>> {
-    match wifi_config()? {
-        None => Ok(usb_devices()
-            .await?
-            .into_iter()
-            .map(|device| Listed {
-                udid: device.udid,
-                transport: Transport::Usb,
-            })
-            .collect()),
-        Some(config) => wifi::list(&config).await,
+    match mode()? {
+        Mode::Usb => Ok(usb_listed().await?),
+        Mode::Wifi => {
+            let config = wifi_config()?.context("Wi-Fi configuration is required")?;
+            wifi::list(&config).await
+        }
+        Mode::Auto => {
+            let mut listed = Vec::new();
+            let mut usb_error = None;
+            let mut wifi_error = None;
+            match usb_listed().await {
+                Ok(devices) => listed.extend(devices),
+                Err(error) => usb_error = Some(format!("{error:#}")),
+            }
+            if let Some(config) = wifi_config()? {
+                match wifi::list(&config).await {
+                    Ok(phones) => listed.extend(phones),
+                    Err(error) => wifi_error = Some(format!("{error:#}")),
+                }
+            } else {
+                wifi_error = Some("Wi-Fi settings are not configured".into());
+            }
+            if listed.is_empty() && (usb_error.is_some() || wifi_error.is_some()) {
+                return Err(anyhow::anyhow!(
+                    "no phones listed over USB or Wi-Fi\nUSB: {}\nWi-Fi: {}",
+                    usb_error.as_deref().unwrap_or("not listed"),
+                    wifi_error.as_deref().unwrap_or("not listed")
+                ));
+            }
+            listed.sort_by(|a, b| a.udid.cmp(&b.udid));
+            listed.dedup_by(|a, b| a.udid == b.udid);
+            Ok(listed)
+        }
     }
+}
+async fn usb_listed() -> Result<Vec<Listed>> {
+    Ok(usb_devices()
+        .await?
+        .into_iter()
+        .map(|device| Listed {
+            udid: device.udid,
+            transport: Transport::Usb,
+        })
+        .collect())
 }
 
 /// A paired phone and the transport that reaches it. Both transports secure
@@ -483,7 +690,11 @@ impl DeviceProvider {
 /// about 13 s (E6/E7), and 20 s in the E8 run, so the same phone accepts a
 /// later attempt. Nothing reached the phone on a refused connect, so waiting
 /// costs no state.
-pub(crate) const REOPEN_WINDOW: Duration = Duration::from_secs(90);
+///
+/// An attempt that hangs instead of being refused costs its own deadline: at
+/// 15 s per attempt (E13) the window fits twelve tries rather than three
+/// (E9: 90 s held three 30 s timeouts, all empty).
+pub(crate) const REOPEN_WINDOW: Duration = Duration::from_secs(180);
 pub(crate) const REOPEN_DELAY: Duration = Duration::from_millis(500);
 /// Whether the daemon reported a connect it could not serve yet, rather than
 /// a phone that is not there or this host being refused.
