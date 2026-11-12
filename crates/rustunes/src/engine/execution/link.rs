@@ -28,6 +28,22 @@ use crate::engine::execution::removal_batch::next_directory;
 /// E6 about 40 s). Waiting this long on a run's first link either sees that
 /// stall or shows no refresh was due.
 pub(crate) const STALL_WINDOW: Duration = Duration::from_secs(45);
+/// The phone pings an idle link every 13–16 s, including while it refreshes
+/// its disk usage. Silence for longer than this therefore means the port
+/// stalled, even when the mux daemon leaves the client socket open instead of
+/// closing it (netmuxd does; stock usbmuxd closes it and drops the device).
+pub(crate) const LINK_HEARTBEAT: Duration = Duration::from_secs(25);
+/// Reported when the mux daemon itself dropped the phone. A daemon that
+/// removes a stalled device cannot bring it back on its own, so retrying the
+/// run's link is pointless; only a replug (or a daemon restart) re-enumerates
+/// it. netmuxd reopens the device in place instead, so it never reaches this.
+const DAEMON_LOST: &str = "the mux daemon no longer lists the phone: after a USB port stall a daemon that removes the device needs a replug or a restart, not another attempt; reconnect the cable and run the same command again";
+/// One attempt to open an ATC link, including discovery and the handshake.
+/// The phone can ignore a Connect outright after a port stall (E9: no reply,
+/// no refusal), so a shorter bound buys more tries in `REOPEN_WINDOW` without
+/// cutting a handshake that is answering: a live phone answers in well under
+/// a second.
+pub(crate) const ATC_ATTEMPT: Duration = Duration::from_secs(15);
 /// A link that dies between its handshake and the request is replaced this
 /// many times; anything else about a failed session is the batch's own.
 const UNSENT_RETRIES: usize = 3;
@@ -37,6 +53,10 @@ pub(crate) struct RunLink {
     directory: PathBuf,
     link: Option<Link>,
     udid: Option<String>,
+    /// The last phone this run reached, and how. Kept after the link is gone
+    /// so a reopen can tell a daemon that dropped the phone from a phone that
+    /// has not answered yet.
+    reached: Option<(String, device::Transport)>,
     /// The run's first link has not waited out the refresh yet.
     fresh: bool,
 }
@@ -48,6 +68,7 @@ impl RunLink {
             directory,
             link: None,
             udid: None,
+            reached: None,
             fresh: true,
         }
     }
@@ -67,6 +88,9 @@ impl RunLink {
                 Err(error) => {
                     self.link = None;
                     self.udid = None;
+                    if self.daemon_dropped_the_phone().await {
+                        return Err(error).context(DAEMON_LOST);
+                    }
                     if Instant::now() + device::REOPEN_DELAY >= give_up {
                         return Err(error).context("the phone did not accept a new ATC link");
                     }
@@ -76,10 +100,23 @@ impl RunLink {
         }
     }
 
+    /// Whether the mux daemon no longer lists the phone this run was just
+    /// using. Stock usbmuxd removes a device whose port stalled and only a
+    /// hotplug brings it back, so further retries cannot succeed; netmuxd
+    /// keeps the device listed while it reopens it in place.
+    async fn daemon_dropped_the_phone(&self) -> bool {
+        let Some((udid, device::Transport::Usb)) = &self.reached else {
+            return false;
+        };
+        match device::usb_devices().await {
+            Ok(devices) => !devices.iter().any(|device| &device.udid == udid),
+            // A failed listing says nothing about the phone.
+            Err(_) => false,
+        }
+    }
+
     async fn try_open(&mut self, control: &Control) -> Result<()> {
-        let deadline = control
-            .deadline
-            .min(Instant::now() + Duration::from_secs(30));
+        let deadline = control.deadline.min(Instant::now() + ATC_ATTEMPT);
         let provider = timeout_at(deadline, device::provider())
             .await
             .context("ATC discovery deadline")??;
@@ -89,7 +126,8 @@ impl RunLink {
         let directory = next_directory(&self.directory, "open")?;
         create_trace(&directory)?;
         self.link = Some(Link::connect(&provider, &directory, deadline).await?);
-        self.udid = Some(provider.udid);
+        self.udid = Some(provider.udid.clone());
+        self.reached = Some((provider.udid.clone(), provider.transport()));
         Ok(())
     }
 
@@ -108,10 +146,30 @@ impl RunLink {
         if let Some(mut link) = self.link.take() {
             let window =
                 STALL_WINDOW.min(control.deadline.saturating_duration_since(Instant::now()));
-            link.wait_lost(window).await;
+            // The phone stops pinging when it stalls; waiting for the socket
+            // to close only works with a daemon that closes it.
+            link.wait_lost_with_quiet(window, LINK_HEARTBEAT.min(window))
+                .await;
         }
         self.udid = None;
         self.open(control).await
+    }
+
+    /// Drop the run's link when this batch selected another transport. The
+    /// next `begin` opens a link through `device::provider()`, so a run that
+    /// gains USB or loses Wi-Fi changes transport at the batch boundary
+    /// instead of carrying one transport's link beside the other's AFC
+    /// connection.
+    pub(crate) fn expect_transport(&mut self, transport: device::Transport) {
+        if self.link.is_some()
+            && self
+                .reached
+                .as_ref()
+                .is_some_and(|(_, reached)| *reached != transport)
+        {
+            self.link = None;
+            self.udid = None;
+        }
     }
 
     /// Start one session on the run's link. A link the phone closed while
@@ -122,6 +180,7 @@ impl RunLink {
         prepared: Prepared,
         trace: &Path,
         expected: &str,
+        transport: device::Transport,
         control: &Control,
     ) -> Result<Session> {
         let mut prepared = prepared;
@@ -130,6 +189,12 @@ impl RunLink {
             ensure!(
                 self.udid.as_deref() == Some(expected),
                 "the run's link is to another device"
+            );
+            ensure!(
+                self.reached
+                    .as_ref()
+                    .is_some_and(|(_, reached)| *reached == transport),
+                "the run's link is on another transport than this batch's discovery"
             );
             let link = self.link.take().context("the run's link vanished")?;
             match link

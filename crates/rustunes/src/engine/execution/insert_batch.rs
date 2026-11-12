@@ -1211,6 +1211,8 @@ pub(crate) async fn send_session<T: session::StartedOperation>(
             found.udid == current.device,
             "discovered device differs from the captured state"
         );
+        let transport = found.transport();
+        link.expect_transport(transport);
         let found = provider.insert(found);
         let afc = afc.insert(
             Transfer::connect_bounded(
@@ -1229,7 +1231,7 @@ pub(crate) async fn send_session<T: session::StartedOperation>(
         }
         control.check()?;
         let live = session.insert(
-            link.begin(session_prepared, &send, &current.device, control)
+            link.begin(session_prepared, &send, &current.device, transport, control)
                 .await?,
         );
         crate::engine::execution::native_insert::batch_guard(afc, &state, &names).await?;
@@ -1493,6 +1495,7 @@ pub(crate) async fn add_all(
             bytes,
             removals: removals.len(),
         })?;
+        let _batch = device::enter_batch(number + 1);
         let session = std::mem::take(&mut removals);
         let mut attempt = 1;
         let (batch, control) = loop {

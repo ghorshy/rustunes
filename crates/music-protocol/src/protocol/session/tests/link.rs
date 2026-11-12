@@ -235,6 +235,64 @@ async fn a_refresh_notice_does_not_end_the_wait_before_the_window() {
 }
 
 #[tokio::test]
+async fn a_silent_link_is_reported_lost_while_its_socket_stays_open() {
+    let link_trace = Temporary::new();
+    let (client, mut peer) = transport(MAX_BYTES).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let device = async {
+        handshake(&mut peer).await;
+        peer.write_all(&wire(&incoming("Ping", None)))
+            .await
+            .unwrap();
+        assert_eq!(command(&outgoing(&mut peer).await.0), "Pong");
+        // The port stalls: the phone says nothing more, while the mux daemon
+        // keeps this client's socket open and never reports the loss.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    let host = async {
+        let mut link = Link::from_atc(client, &link_trace.0, deadline);
+        link.handshake(deadline).await.unwrap();
+        assert!(
+            link.wait_lost_with_quiet(Duration::from_secs(5), Duration::from_millis(100))
+                .await,
+            "a phone that stopped pinging has stalled its port"
+        );
+    };
+    tokio::join!(device, host);
+}
+
+#[tokio::test]
+async fn pings_within_the_quiet_bound_keep_the_wait_alive() {
+    let link_trace = Temporary::new();
+    let (client, mut peer) = transport(MAX_BYTES).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let device = async {
+        handshake(&mut peer).await;
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            peer.write_all(&wire(&incoming("Ping", None)))
+                .await
+                .unwrap();
+            assert_eq!(command(&outgoing(&mut peer).await.0), "Pong");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let host = async {
+        let mut link = Link::from_atc(client, &link_trace.0, deadline);
+        link.handshake(deadline).await.unwrap();
+        assert!(
+            !link
+                .wait_lost_with_quiet(Duration::from_millis(300), Duration::from_millis(150))
+                .await,
+            "an answered ping shows the link is alive"
+        );
+    };
+    tokio::join!(device, host);
+}
+
+#[tokio::test]
 async fn a_stall_ends_the_wait_before_the_window() {
     let link_trace = Temporary::new();
     let (client, mut peer) = transport(MAX_BYTES).await;

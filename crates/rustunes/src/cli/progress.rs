@@ -180,6 +180,12 @@ pub(super) fn thinned(event: &Event<'_>) -> bool {
 }
 
 /// The progress line an event prints on stderr, if it prints one there.
+fn transport_name(transport: device::Transport) -> &'static str {
+    match transport {
+        device::Transport::Usb => "USB",
+        device::Transport::Wifi(_) => "Wi-Fi",
+    }
+}
 pub(super) fn line(event: &Event<'_>) -> Result<Option<String>> {
     Ok(Some(match event {
         Event::VerificationStarting => {
@@ -192,6 +198,13 @@ pub(super) fn line(event: &Event<'_>) -> Result<Option<String>> {
                 format!("Wi-Fi device detected at {address} (identifier omitted)")
             }
         },
+        Event::Device(device::Event::TransportChanged { from, to, batch }) => {
+            let mut line = format!("Transport: {} → {}", transport_name(*from), transport_name(*to));
+            if let Some(batch) = batch {
+                line.push_str(&format!(" (batch {batch})"));
+            }
+            line
+        }
         Event::Device(device::Event::PairingRecordAvailable) => {
             "Existing pairing record available".into()
         }

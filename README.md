@@ -304,7 +304,7 @@ rustunes pull --tracks                 # ... and copy the other phone tracks int
 All three take `--dry-run` and `--recursive`. Without `--recursive`, only the
 files directly inside the folder are read.
 
-### Over Wi-Fi
+### Over Wi-Fi, or whichever is available
 
 Pair once over USB (see [Getting started](#getting-started)). After that, add
 `--wifi` to any command:
@@ -317,6 +317,17 @@ rustunes sync --wifi-address 192.0.2.10  # or give its address
 
 Once rustunes has found the phone awake on this network, it may be locked:
 rustunes wakes it and keeps it awake for the run.
+
+With `--transport auto`, rustunes uses USB when the phone is connected and
+falls back to Wi-Fi when it is not. The choice is made again before every
+batch, so plugging the cable in speeds up the rest of a run, and unplugging it
+continues over Wi-Fi without restarting. `--wifi-address IP` pins the Wi-Fi
+fallback address.
+
+```bash
+rustunes sync --transport auto
+rustunes sync --transport auto --wifi-address 192.0.2.10
+```
 
 ### How tracks are matched
 
@@ -400,7 +411,8 @@ These work with every command, before or after the command name.
 | Option | What it does |
 | --- | --- |
 | `--wifi` | Reach the phone over Wi-Fi instead of USB. It must have been paired over USB once and be on this network; it is found by Bonjour. Have it awake the first time: after that rustunes wakes it even while it is locked, by the address and Wi-Fi identity it last answered with. If a locked phone stops answering, unlock it once so rustunes learns them again. |
-| `--wifi-address IP` | Reach the phone over Wi-Fi at this address instead of searching for it. Implies `--wifi`. |
+| `--wifi-address IP` | Reach the phone over Wi-Fi at this address instead of searching for it. Implies `--wifi`. With `--transport auto`, pins the Wi-Fi fallback address. |
+| `--transport usb\|wifi\|auto` | `usb` (default) or `wifi` fixes the transport for the command. `auto` uses USB when the phone is connected and Wi-Fi otherwise, deciding again before every batch. |
 | `--device UDID` | Pick a phone by its identifier from `device list`, when more than one is connected. |
 | `--full-readback` | Audit mode: copy every track's audio back from the phone and rehash every local file, instead of trusting the fingerprint caches. Slow (minutes per pass); refreshes both caches. |
 | `--message-format human\|json` | `human` (default) prints sentences. `json` prints one JSON record per line on stdout, for scripts and GUIs. See [JSON output](#json-output). |

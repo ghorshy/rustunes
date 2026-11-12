@@ -757,6 +757,7 @@ pub(crate) async fn update_all(
     let mut session = 1;
     let mut attempt = 1;
     while session <= MAX_SESSIONS + 1 {
+        let _batch = crate::engine::execution::device::enter_batch(session);
         let control = control();
         let (identity, before) = removal_batch::capture_fresh(
             &directory.join(match attempt {
