@@ -637,6 +637,7 @@ pub async fn run(
     // One ATC link for the whole deletion: the removal and the playlist
     // session that finishes a clear share it.
     let mut link = crate::engine::execution::link::RunLink::new(run.join("link"));
+    let started_batches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut settled = removal_batch::remove_all(
         &journal_path,
         &identity,
@@ -648,9 +649,11 @@ pub async fn run(
         || engine.control(o.seconds),
         &mut link,
         {
+            let started_batches = Arc::clone(&started_batches);
             let mut number = 0;
             move |_, _, _| {
                 number += 1;
+                started_batches.store(number, Ordering::Relaxed);
                 engine.emit(crate::engine::Event::Deletion(Event::Step {
                     number,
                     total: batches,
@@ -660,10 +663,19 @@ pub async fn run(
     )
     .await
     .with_context(|| {
-        format!(
-            "removal stopped; running the same command again settles an unfinished batch and continues; evidence: {}",
-            run.display()
-        )
+        if started_batches.load(Ordering::Relaxed) == 0 {
+            format!(
+                "nothing was removed: no removal batch started, so no batch is outstanding; \
+                 the run could not open its ATC session and the same command retries that step; \
+                 evidence: {}",
+                run.display()
+            )
+        } else {
+            format!(
+                "removal stopped; running the same command again settles an unfinished batch and continues; evidence: {}",
+                run.display()
+            )
+        }
     })?;
     if let Some(id) = coordination {
         let batch = finish_clear(
