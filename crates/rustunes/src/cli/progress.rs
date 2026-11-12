@@ -245,7 +245,7 @@ pub(super) fn line(event: &Event<'_>) -> Result<Option<String>> {
             inserted,
             total,
             removed: 0,
-            inherited: 0,
+            cleared: 0,
         } => {
             format!("Verified insert batch: {inserted}/{total} new tracks on the phone.")
         }
@@ -253,7 +253,7 @@ pub(super) fn line(event: &Event<'_>) -> Result<Option<String>> {
             inserted,
             total,
             removed,
-            inherited,
+            cleared,
         } => {
             let mut message = if *removed == 0 {
                 format!("Verified insert batch: {inserted}/{total} new tracks on the phone.")
@@ -262,9 +262,9 @@ pub(super) fn line(event: &Event<'_>) -> Result<Option<String>> {
                     "Verified insert batch: its session removed {removed} track(s), and {inserted}/{total} new tracks are on the phone."
                 )
             };
-            if *inherited > 0 {
+            if *cleared > 0 {
                 message.push_str(&format!(
-                    " {inherited} of them sent no cover but show the one the phone kept for the item id the insert reused."
+                    " {cleared} of them sent no cover, so the cover the phone kept for the reused item id was cleared."
                 ));
             }
             message
