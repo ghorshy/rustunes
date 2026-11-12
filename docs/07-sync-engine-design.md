@@ -842,7 +842,12 @@ removals and 100 additions. The phone applies such a session as one (chapter
   observed and never sent again. The rows a killed session left without audio
   must be its insert half's own targets; the next `sync` settles the session
   first and captures the phone again, while its dry run names the `resume`
-  that settles it.
+  that settles it. A lone insert or metadata batch is settled the same way: a
+  run observes it before it plans rather than refusing to start. An
+  observation that fails is made again up to three times, ten seconds apart,
+  for removals, inserts and metadata alike: a cable pulled mid-batch and
+  plugged back within that window lets the same run continue, and the stop only
+  names `resume` once every observation has failed.
 - **On the phone.** Mirroring syncs of a scratch library sent 5 removals and 2
   additions, then 249 and 250 (500 operations, about 75 s), each as one
   verified session moving the anchor by one. A session of 50 and 50 killed

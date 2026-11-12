@@ -995,8 +995,12 @@ pub(crate) async fn run(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    match (
-        settle_with(
+    // A failed observation may be the phone finishing the session or a cable
+    // that came out; observing again a pause apart lets a replugged cable
+    // continue this run instead of leaving the batch to resume.
+    let mut attempt = 1;
+    let observed = loop {
+        match settle_with(
             journal,
             identity,
             &batch,
@@ -1006,17 +1010,36 @@ pub(crate) async fn run(
             control,
             link,
         )
-        .await,
-        wire,
-    ) {
+        .await
+        {
+            Ok(settled) => break Ok(settled),
+            Err(error) => {
+                if !removal_batch::observe_again(
+                    &send,
+                    || format!("Insert batch {}", id.as_i64()),
+                    attempt,
+                    &error,
+                    control,
+                )
+                .await
+                {
+                    break Err(error);
+                }
+                attempt += 1;
+            }
+        }
+    };
+    match (observed, wire) {
         (Ok(settled), _) => Ok(settled),
         (Err(error), Ok(())) => Err(error.context(format!(
-            "insert batch {} is Started; run resume to observe it again",
-            id.as_i64()
+            "insert batch {} is Started after {} observations; run resume to observe it again",
+            id.as_i64(),
+            removal_batch::SETTLE_ATTEMPTS
         ))),
         (Err(error), Err(wire)) => Err(error.context(format!(
-            "insert batch {} is Started after a transport error ({wire:#}); run resume to observe it again",
-            id.as_i64()
+            "insert batch {} is Started after a transport error ({wire:#}) and {} observations; run resume to observe it again",
+            id.as_i64(),
+            removal_batch::SETTLE_ATTEMPTS
         ))),
     }
 }
@@ -1854,8 +1877,28 @@ pub(crate) async fn resume(
         }
         InsertBatchState::Started => {
             let mut link = RunLink::new(batch.evidence.join("resume-link"));
-            let settled =
-                settle(&mut journal, identity, batch, host_name, control, &mut link).await?;
+            // The same window as a run's own observation: a phone that was
+            // reconnected while resume started is waited for, not refused.
+            let mut attempt = 1;
+            let settled = loop {
+                match settle(&mut journal, identity, batch, host_name, control, &mut link).await {
+                    Ok(settled) => break Ok(settled),
+                    Err(error) => {
+                        if !removal_batch::observe_again(
+                            &batch.evidence,
+                            || format!("Insert batch {id}"),
+                            attempt,
+                            &error,
+                            control,
+                        )
+                        .await
+                        {
+                            break Err(error);
+                        }
+                        attempt += 1;
+                    }
+                }
+            }?;
             Resumed {
                 state: settled.state,
                 evidence: settled.evidence,

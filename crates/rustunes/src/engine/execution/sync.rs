@@ -173,7 +173,7 @@ pub(crate) async fn run_with(
             run.join("link"),
         )),
     };
-    let snapshot_path = match options.snapshot {
+    let mut snapshot_path = match options.snapshot {
         Some(path) => std::fs::canonicalize(path).context("opening supplied snapshot")?,
         None => {
             let path = run.join("snapshot");
@@ -189,7 +189,7 @@ pub(crate) async fn run_with(
             path
         }
     };
-    let saved = snapshot::open(&snapshot_path)?;
+    let mut saved = snapshot::open(&snapshot_path)?;
     let journal = match options.journal {
         Some(path) => std::path::absolute(path)?,
         // A replacement carried its journal forward before it began.
@@ -210,11 +210,58 @@ pub(crate) async fn run_with(
             &saved.identity.library_identity_sha256,
         )?,
     };
-    if coordination.is_none() && journal.try_exists()? {
+    if coordination.is_none() && options.snapshot.is_none() && journal.try_exists()? {
         let identity = Identity::for_saved_device(
             saved.identity.device_identifier_sha256,
             &music_protocol::catalogue::identity::parse(&saved.raw_preferences)?,
         )?;
+        // A batch an earlier run left unfinished is settled first, as resume
+        // would: observing the phone never resends, and a cable replugged
+        // after the earlier run ended is enough to continue without the user
+        // finding the snapshot and journal themselves. A dry run settles
+        // nothing and only names `resume` below.
+        if !options.dry_run
+            && crate::engine::recovery::resume::has_unfinished_batch(&journal, &identity)?
+        {
+            engine.emit(Event::SyncResuming(
+                "an earlier run left a batch unfinished, which is settled first",
+            ))?;
+            let trace = run.join("settled");
+            crate::engine::recovery::resume::run(
+                crate::engine::recovery::resume::Options {
+                    snapshot: &snapshot_path,
+                    journal: &journal,
+                    run_dir: None,
+                    trace: &trace,
+                    cancel_prepared: None,
+                    selected_device: None,
+                },
+                engine,
+            )
+            .await?;
+            // Settling may have removed rows (a Partial batch's compensation),
+            // so plan from a capture of the phone as it is now.
+            let path = run.join("snapshot-settled");
+            let control = engine.control(options.seconds);
+            Box::pin(audio_capture::capture_with_control(
+                &path,
+                &control,
+                device::provider,
+            ))
+            .await?;
+            let observed = snapshot::open(&path)?;
+            let settled = Identity::for_saved_device(
+                observed.identity.device_identifier_sha256,
+                &music_protocol::catalogue::identity::parse(&observed.raw_preferences)?,
+            )?;
+            ensure!(
+                settled.device_digest() == identity.device_digest()
+                    && settled.library_digest() == identity.library_digest(),
+                "the connected phone or library changed while the earlier batch was settled"
+            );
+            snapshot_path = path;
+            saved = observed;
+        }
         crate::engine::execution::replace::ensure_no_unfinished_attempt(
             &journal,
             &identity,

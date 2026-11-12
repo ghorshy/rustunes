@@ -373,6 +373,21 @@ fn locationless_snapshot(f: &Fixture) -> PathBuf {
 }
 
 #[tokio::test]
+async fn a_journals_unfinished_batch_is_what_a_run_settles_before_planning() {
+    let f = Fixture::new();
+    let mut journal = f.journal();
+    let path = f.root.join("journal");
+    assert!(!has_unfinished_batch(&path, &f.identity).unwrap());
+    let evidence = f.root.join("batch");
+    fs::DirBuilder::new().mode(0o700).create(&evidence).unwrap();
+    test_support::prepare_insert_batch_at(&mut journal, f.content(), &evidence);
+    drop(journal);
+    // A Prepared batch is unfinished: `resume` cancels it rather than a run
+    // telling the user to find the snapshot and journal themselves.
+    assert!(has_unfinished_batch(&path, &f.identity).unwrap());
+}
+
+#[tokio::test]
 async fn a_snapshot_with_rows_without_audio_identifies_the_phone_for_a_batch() {
     let f = Fixture::new();
     let snapshot = locationless_snapshot(&f);

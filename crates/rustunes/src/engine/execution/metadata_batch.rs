@@ -206,18 +206,40 @@ pub(crate) async fn run(
         );
     }
     let batch = journal.metadata_batch(id)?;
-    match (
-        settle(journal, identity, &batch, Window::SameRun, control).await,
-        wire,
-    ) {
+    // A failed observation may be the phone finishing the session or a cable
+    // that came out; observing again a pause apart lets a replugged cable
+    // continue this run instead of leaving the batch to resume.
+    let mut attempt = 1;
+    let observed = loop {
+        match settle(journal, identity, &batch, Window::SameRun, control).await {
+            Ok(settled) => break Ok(settled),
+            Err(error) => {
+                if !removal_batch::observe_again(
+                    &send,
+                    || format!("Metadata batch {}", id.as_i64()),
+                    attempt,
+                    &error,
+                    control,
+                )
+                .await
+                {
+                    break Err(error);
+                }
+                attempt += 1;
+            }
+        }
+    };
+    match (observed, wire) {
         (Ok(settled), _) => Ok(settled),
         (Err(error), Ok(())) => Err(error.context(format!(
-            "metadata batch {} is Started; run resume to observe it again",
-            id.as_i64()
+            "metadata batch {} is Started after {} observations; run resume to observe it again",
+            id.as_i64(),
+            removal_batch::SETTLE_ATTEMPTS
         ))),
         (Err(error), Err(wire)) => Err(error.context(format!(
-            "metadata batch {} is Started after a transport error ({wire:#}); run resume to observe it again",
-            id.as_i64()
+            "metadata batch {} is Started after a transport error ({wire:#}) and {} observations; run resume to observe it again",
+            id.as_i64(),
+            removal_batch::SETTLE_ATTEMPTS
         ))),
     }
 }

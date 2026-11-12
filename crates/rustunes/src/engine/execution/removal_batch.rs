@@ -78,12 +78,39 @@ const CHUNK: u64 = 64 * 1024;
 const ASSET_WAIT: Duration = Duration::from_secs(120);
 /// Observations of a Started batch before a run leaves it for the next run
 /// (or resume): the phone may still be finishing the session, drop a
-/// connection or remove files late.
-const SETTLE_ATTEMPTS: usize = 3;
-const SETTLE_PAUSE: Duration = Duration::from_secs(10);
+/// connection or remove files late. The pause is also the window in which a
+/// cable unplugged mid-batch can be plugged back in and the run continues by
+/// itself. Shared by every batch kind that settles by observation.
+pub(crate) const SETTLE_ATTEMPTS: usize = 3;
+pub(crate) const SETTLE_PAUSE: Duration = Duration::from_secs(10);
 /// Attempts per batch of a run: one the phone rolled back (NotApplied) or
 /// that was never sent is sent once more, as a new batch from fresh state.
 pub(crate) const BATCH_ATTEMPTS: usize = 2;
+
+/// Observe a Started batch again after a failed observation. A phone still
+/// finishing its session, a cable pulled and plugged back or Wi-Fi that came
+/// and went may settle on the next look, so the run carries on instead of
+/// naming `resume`. `what` names the batch in `observation-error-N.txt`, the
+/// file each failed attempt leaves in `directory`. Returns whether another
+/// observation follows.
+pub(crate) async fn observe_again(
+    directory: &Path,
+    what: impl Fn() -> String,
+    attempt: usize,
+    error: &anyhow::Error,
+    control: &Control,
+) -> bool {
+    if attempt >= SETTLE_ATTEMPTS || control.check().is_err() {
+        return false;
+    }
+    let _ = durable_write(
+        directory,
+        &format!("observation-error-{attempt}.txt"),
+        format!("{error:#}\n{} is observed again.\n", what()).as_bytes(),
+    );
+    tokio::time::sleep(SETTLE_PAUSE).await;
+    true
+}
 
 /// A complete before-state: snapshot (catalogue, complete audio index) and
 /// Current (CDB, ArtworkDB) captured back to back with identical SQL bytes.
@@ -645,16 +672,21 @@ async fn send_and_settle(
     let mut attempt = 1;
     let observed = loop {
         match settle(journal, identity, &batch, Window::SameRun, control).await {
-            Err(error) if attempt < SETTLE_ATTEMPTS && control.check().is_ok() => {
-                let _ = durable_write(
+            Ok(settled) => break Ok(settled),
+            Err(error) => {
+                if !observe_again(
                     &send,
-                    &format!("observation-error-{attempt}.txt"),
-                    format!("{error:#}\nBatch {} is observed again.\n", id.as_i64()).as_bytes(),
-                );
+                    || format!("Removal batch {}", id.as_i64()),
+                    attempt,
+                    &error,
+                    control,
+                )
+                .await
+                {
+                    break Err(error);
+                }
                 attempt += 1;
-                tokio::time::sleep(SETTLE_PAUSE).await;
             }
-            result => break result,
         }
     };
     match (observed, wire) {
