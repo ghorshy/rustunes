@@ -665,7 +665,7 @@ async fn remove(
     // One ATC link for the whole deletion: the removal and the playlist
     // session that finishes a clear share it.
     let mut link = crate::engine::execution::link::RunLink::new(run.join("link"));
-    let mut settled = removal_batch::remove_all(
+    let mut settled = match removal_batch::remove_all(
         &journal_path,
         &identity,
         sent,
@@ -687,12 +687,19 @@ async fn remove(
         },
     )
     .await
-    .with_context(|| {
-        format!(
-            "removal stopped; running the same command again settles an unfinished batch and continues; evidence: {}",
-            run.display()
-        )
-    })?;
+    {
+        Ok(settled) => settled,
+        Err(error) => {
+            // The journal, not the batches reported so far, says whether a
+            // batch is left to settle: one can stop Started before it is
+            // reported, and a later one can fail before it starts.
+            let outstanding = Journal::open_read_only(&journal_path, &identity)
+                .and_then(|journal| journal.outstanding_removal_batch())
+                .ok()
+                .map(|batch| batch.is_some());
+            return Err(error.context(removal_stopped(outstanding, &run)));
+        }
+    };
     if let Some(id) = coordination {
         let batch = finish_clear(
             &journal_path,
@@ -738,6 +745,26 @@ async fn remove(
         deleted_playlists,
         left: left.to_vec(),
     })
+}
+
+/// The error that stops a deletion after its removal session or a batch
+/// failed. `outstanding` is whether the journal holds an unfinished removal
+/// batch, None when it could not be read. With none, nothing is left to settle
+/// and the same command removes what is left from a fresh capture; otherwise
+/// running it again settles the batch first and carries on.
+fn removal_stopped(outstanding: Option<bool>, evidence: &Path) -> String {
+    if outstanding == Some(false) {
+        format!(
+            "removal stopped; no removal batch is outstanding, so running the same command \
+             again removes what is left from a fresh capture; evidence: {}",
+            evidence.display()
+        )
+    } else {
+        format!(
+            "removal stopped; running the same command again settles an unfinished batch and continues; evidence: {}",
+            evidence.display()
+        )
+    }
 }
 
 /// The removals a sync's removal leaves it: those that do not fill a batch,
@@ -1093,6 +1120,30 @@ mod tests {
             removal_batch::taken(&t.path(), &identity()).unwrap(),
             BTreeSet::from([7])
         );
+    }
+    /// A deletion whose journal holds no unfinished batch says so instead of
+    /// offering to settle one that is not there; one with an unfinished batch,
+    /// or whose journal could not be read, is settled by the next run.
+    #[test]
+    fn a_deletion_with_no_outstanding_batch_does_not_offer_to_settle_one() {
+        let evidence = Path::new("/run/evidence");
+        let none = removal_stopped(Some(false), evidence);
+        assert!(
+            none.starts_with("removal stopped; no removal batch is outstanding")
+                && none.contains("removes what is left from a fresh capture")
+                && none.ends_with("evidence: /run/evidence"),
+            "{none}"
+        );
+        assert!(!none.contains("settles an unfinished batch"), "{none}");
+        for outstanding in [Some(true), None] {
+            let some = removal_stopped(outstanding, evidence);
+            assert!(
+                some.starts_with(
+                    "removal stopped; running the same command again settles an unfinished batch and continues"
+                ) && some.ends_with("evidence: /run/evidence"),
+                "{some}"
+            );
+        }
     }
     #[tokio::test]
     async fn cancelled_request_never_allocates_evidence_or_asks_for_confirmation() {
