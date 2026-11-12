@@ -954,7 +954,7 @@ The table lists what was observed on the phone and what the tool does.
 | Removal batch, killed at the phone's first Progress message | Rolled the session back, but may already have deleted a target's audio file | Observation finds the anchor unmoved and nothing changed: settled **NotApplied**. A later removal accepts a row whose file is gone, but only for a track named by a batch the phone did not apply. The next batch removes the row with no file to wait for. CONFIRMED |
 | Removal batch, killed at AssetManifest or SyncFinished | Applied the session | Observation matches the model: settled **Verified** without resending. CONFIRMED |
 | Playlist-deleting removal batch, killed at the first Progress | Applied it (unlike a track session killed there) | Settled Verified. The NotApplied path of a playlist batch has not been seen. CONFIRMED |
-| Removal batch applied but the verifier's model was too narrow (album status, hero revision, stats revision of an emptied album, playlist evaluated for keeping local, artist store-id resolution) | Applied | Batch stays Started. After the model is corrected, `resume` or the same command settles it without resending. CONFIRMED several times |
+| Removal batch applied but the verifier's model was too narrow (album status, hero revision, stats revision of an emptied album, playlist evaluated for keeping local, artist store-id resolution with its artwork rows, the phone's later token cleanup) | Applied | Batch stays Started. After the model is corrected, `resume` or the same command settles it without resending. CONFIRMED several times |
 | Insert batch killed mid-upload | Created every row up front; some files arrived, some did not | `resume` settles **Partial**: arrived files are bound with their covers verified, files absent leave locationless rows. A **compensating removal batch** removes exactly those rows. The insert batch becomes Compensated. CONFIRMED |
 | Insert batch abandoned before any upload | Deleted some of its own rows, kept the rest without audio | Rows the phone deleted are recorded as **removed by the phone** (a fourth target outcome, section 3.3). The remaining locationless rows are compensated. CONFIRMED |
 | Insert batch where the host stopped before completing a non-ALAC destination | Row created, no audio | Compensated. Completion takes the MPEG path for `.mp3` destinations. CONFIRMED |
@@ -1237,8 +1237,11 @@ The tool therefore passes a window to every verifier.
   - full-record revisions of live items renumbered above the old maximum, and
     statistics revisions added or dropped once superseded;
   - the phone resolving an artist's iTunes Store ID from zero, with the
-    artist's live revision advancing above the tombstones and the artist image
-    import revision following the highest resolved revision;
+    artist's live revision advancing above the tombstones, one store artist
+    image row in each artwork token table, and the artist image import
+    revision following the highest resolved revision;
+  - the phone deleting token rows of an entity that is already gone, on its
+    own, some time after the session (observed for collected groups);
   - the maintenance task date advancing.
 - Every other table and cell is still compared exactly, so a content change is
   refused. The receipt records the absorbed effects. The absorption grants no

@@ -18,8 +18,11 @@
 //! as a metadata edit evaluated one. A session may instead collect every group
 //! no item belongs to any more (observed for 100 targets): each such group row
 //! goes, its live revision becomes a tombstone above the item tombstones, its
-//! stats revision row goes, and its artwork token rows stay. The next session
-//! deletes such token rows, whose entity was already gone when it began. A
+//! stats revision row goes, and its artwork token rows stay. The phone deletes
+//! such token rows itself some time later, so a later run accepts their
+//! absence. A session may also resolve an artist's iTunes Store ID (observed
+//! for 143 artists): the group's `store_id` and live revision move above the
+//! tombstones, and one store artist image row replaces its artwork rows. A
 //! session also moves an artist's or a genre's representative off a member
 //! without a cover to its lowest member with one. A target's memberships in
 //! ordinary playlists go, and those playlists close up (`playlists`); any
@@ -152,6 +155,9 @@ pub struct RemovalReceipt {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     filled_phone_entries: Vec<i64>,
     removed_orphan_artwork_rows: u32,
+    /// Token rows the phone removed itself between runs because their entity
+    /// was already gone (observed for the groups a session collected).
+    removed_late_artwork_rows: u32,
     survivor_revision_refresh: Vec<RevisionRefresh>,
     /// Group store ids the phone resolved after the session, with the live
     /// revision it advanced above the session's highest tombstone.
@@ -387,6 +393,40 @@ fn verify_with(
         let key = t.column(group.key)?;
         t.rows
             .retain(|r, _| r[key] != Cell::Integer(group.group_pid));
+    }
+    // The phone also deletes token rows of entities that are gone, on its own,
+    // some time after the session (observed: the groups it collected). A
+    // same-run capture still requires them to stay.
+    let mut removed_late_artwork_rows = 0;
+    if between_runs.is_some() {
+        for name in ["artwork_token", "best_artwork_token"] {
+            let mut gone = Vec::new();
+            {
+                let tokens = table(&expected, name)?;
+                let observed = table(after, name)?;
+                for (row, n) in &tokens.rows {
+                    if observed.rows.contains_key(row) {
+                        continue;
+                    }
+                    let kind = typed::int(tokens, row, "entity_type")?;
+                    let Some((_, entities, key)) = TOKEN_ENTITIES.iter().find(|e| e.0 == kind)
+                    else {
+                        continue;
+                    };
+                    let entities_after = table(after, entities)?;
+                    let column = entities_after.column(key)?;
+                    let id = Cell::Integer(typed::int(tokens, row, "entity_pid")?);
+                    if !entities_after.rows.keys().any(|r| r[column] == id) {
+                        gone.push((row.clone(), *n));
+                    }
+                }
+            }
+            let t = expected.get_mut(name).context("artwork table absent")?;
+            for (row, n) in gone {
+                t.rows.remove(&row);
+                removed_late_artwork_rows += n;
+            }
+        }
     }
 
     let recent_counter_resets = recent_counter_resets(before, after, &mut expected, &removed)?;
@@ -659,6 +699,7 @@ fn verify_with(
                         revision_after: after_number,
                     });
                     store_revisions.push((before_row.clone(), after_row.clone()));
+                    take_resolved_artist_artwork(&mut expected, after, id, class)?;
                     changed = true;
                 }
             }
@@ -817,6 +858,7 @@ fn verify_with(
         recent_counter_resets,
         filled_phone_entries,
         removed_orphan_artwork_rows,
+        removed_late_artwork_rows,
         survivor_revision_refresh,
         store_id_resolutions,
         emptied_albums,
@@ -990,6 +1032,94 @@ fn property_changes(
         }
     }
     Ok(changes)
+}
+
+/// The store artwork the phone writes when it resolves an artist's iTunes
+/// Store ID: one artist image row in each token table, replacing whatever rows
+/// the artist had. A phone that wrote none leaves them exact.
+fn take_resolved_artist_artwork(
+    expected: &mut Tables,
+    after: &Tables,
+    id: i64,
+    entity_type: i64,
+) -> Result<()> {
+    let rows_of = |t: &Table| -> Result<Vec<Row>> {
+        let pid = t.column("entity_pid")?;
+        let kind = t.column("entity_type")?;
+        Ok(t.rows
+            .keys()
+            .filter(|r| r[pid] == Cell::Integer(id) && r[kind] == Cell::Integer(entity_type))
+            .cloned()
+            .collect())
+    };
+    let artwork = table(after, "artwork_token")?;
+    let best = table(after, "best_artwork_token")?;
+    let before_artwork = rows_of(table(expected, "artwork_token")?)?;
+    let before_best = rows_of(table(expected, "best_artwork_token")?)?;
+    let after_artwork = rows_of(artwork)?;
+    let after_best = rows_of(best)?;
+    if before_artwork == after_artwork && before_best == after_best {
+        return Ok(());
+    }
+    ensure!(
+        after_artwork.len() == 1 && after_best.len() == 1,
+        "artist {id} store artwork is not one row in each table"
+    );
+    let token = &after_artwork[0];
+    let url = artwork.at(token, "artwork_token")?.text()?;
+    ensure!(
+        typed::int(artwork, token, "artwork_source_type")? == 500
+            && typed::int(artwork, token, "artwork_type")? == 4
+            && typed::int(artwork, token, "artwork_variant_type")? == 0
+            && url.starts_with("https://")
+            && [
+                "primary_text_color",
+                "secondary_text_color",
+                "tertiary_text_color",
+                "quaternary_text_color",
+                "background_color",
+                "gradient_text_color",
+                "gradient_color",
+            ]
+            .iter()
+            .all(|c| artwork
+                .at(token, c)
+                .is_ok_and(|v| v.text().is_ok_and(str::is_empty)))
+            && typed::real(artwork.at(token, "gradient_size_start")?)? == -1.0
+            && typed::real(artwork.at(token, "gradient_size_end")?)? == -1.0,
+        "artist {id} store artwork is not the observed shape"
+    );
+    let choice = &after_best[0];
+    ensure!(
+        typed::int(best, choice, "artwork_type")? == 4
+            && typed::int(best, choice, "artwork_variant_type")? == 0
+            && typed::int(best, choice, "fetchable_artwork_source_type")? == 0
+            && best
+                .at(choice, "fetchable_artwork_token")?
+                .text()?
+                .is_empty()
+            && best.at(choice, "available_artwork_token")?.text()? == url,
+        "artist {id} best store artwork does not match its token"
+    );
+    for (name, before, after) in [
+        ("artwork_token", before_artwork, after_artwork),
+        ("best_artwork_token", before_best, after_best),
+    ] {
+        let t = expected.get_mut(name).context("artwork table absent")?;
+        for row in before {
+            ensure!(
+                t.rows.remove(&row) == Some(1),
+                "artist {id} artwork row is missing"
+            );
+        }
+        for row in after {
+            ensure!(
+                t.rows.insert(row, 1).is_none(),
+                "artist {id} artwork row is duplicated"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Rows of an artwork token table whose entity does not exist.

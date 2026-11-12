@@ -123,6 +123,8 @@ fn a_later_run_absorbs_the_phones_store_id_resolution() {
         UPDATE album_artist SET store_id=43 WHERE album_artist_pid=21;
         UPDATE entity_revision SET revision=11 WHERE entity_pid=13 AND class=2 AND revision_type=0;
         UPDATE entity_revision SET revision=12 WHERE entity_pid=21 AND class=7 AND revision_type=0;
+        INSERT INTO artwork_token(entity_pid,artwork_token,artwork_source_type,artwork_type,entity_type)VALUES(13,'https://example.invalid/a.jpg',500,4,2),(21,'https://example.invalid/b.jpg',500,4,7);
+        INSERT INTO best_artwork_token(entity_pid,entity_type,artwork_type,available_artwork_token)VALUES(13,2,4,'https://example.invalid/a.jpg'),(21,7,4,'https://example.invalid/b.jpg');
         UPDATE _MLDatabaseProperties SET value='12' WHERE key='MLArtistHeroImageImportDatabaseRevision';";
     let (_f, before, after) = pair(both, resolution, false);
     let receipt = serde_json::to_value(later(&before, &after).unwrap()).unwrap();

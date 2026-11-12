@@ -474,6 +474,20 @@ fn a_session_may_drop_tokens_whose_entity_was_already_gone() {
     assert!(verify(&before, &after, &[1], 10).is_err());
 }
 
+#[test]
+fn a_later_run_accepts_the_phones_cleanup_of_a_collected_groups_artwork() {
+    // The phone deletes a collected group's token rows itself, some time
+    // after the session; a same-run capture still sees them.
+    let cleaned =
+        format!("{COLLECTED} DELETE FROM artwork_token WHERE entity_pid=11 AND entity_type=4;");
+    let pair = Pair::new(GROUP_REVISIONS, &cleaned);
+    let (before, after) = pair.tables();
+    assert!(verify(&before, &after, &[1, 3, 4], 10).is_err());
+    let rule = |_: &mut Tables, _: &Tables, _: i64| Ok(None);
+    let receipt = verify_later(&before, &after, &[1, 3, 4], 10, &rule).unwrap();
+    assert_eq!(receipt.removed_late_artwork_rows, 1);
+}
+
 /// Ordinary synced playlists: 88 [1,2,4], 89 [1], 90 [2,3,4,1] and 91 [2,4],
 /// each with its count row, seed sentinel, live revision and (but 91) a
 /// membership revision. Revision 9 is left free for the base tombstone.
@@ -900,6 +914,46 @@ fn store_id_resolution_is_taken_from_the_phones_own_revision_advance() {
     );
     let (before, after) = pair.tables();
     assert!(verify(&before, &after, &[1], 10).is_err());
+}
+
+#[test]
+fn store_id_resolution_takes_the_artists_store_artwork() {
+    let resolution = "UPDATE item_artist SET store_id=42 WHERE item_artist_pid=13;
+        UPDATE album_artist SET store_id=43 WHERE album_artist_pid=21;
+        UPDATE entity_revision SET revision=11 WHERE entity_pid=13 AND class=2 AND revision_type=0;
+        UPDATE entity_revision SET revision=12 WHERE entity_pid=21 AND class=7 AND revision_type=0;
+        UPDATE _MLDatabaseProperties SET value='12' WHERE key='MLArtistHeroImageImportDatabaseRevision';";
+    let artwork = "INSERT INTO artwork_token(entity_pid,artwork_token,artwork_source_type,artwork_type,entity_type)VALUES(13,'https://example.invalid/a.jpg',500,4,2),(21,'https://example.invalid/b.jpg',500,4,7);
+        INSERT INTO best_artwork_token(entity_pid,entity_type,artwork_type,available_artwork_token)VALUES(13,2,4,'https://example.invalid/a.jpg'),(21,7,4,'https://example.invalid/b.jpg');";
+    let pair = Pair::new(ARTIST_REVISIONS, &format!("{resolution}{artwork}"));
+    let (before, after) = pair.tables();
+    let receipt = verify(&before, &after, &[1], 10).unwrap();
+    assert_eq!(receipt.store_id_resolutions.len(), 2);
+    // A later run's rule sees the artwork already in the model.
+    let rule = |_: &mut Tables, _: &Tables, _: i64| Ok(None);
+    verify_later(&before, &after, &[1], 10, &rule).unwrap();
+    // Without the resolution the artwork is unmodelled.
+    let pair = Pair::new(ARTIST_REVISIONS, artwork);
+    let (before, after) = pair.tables();
+    assert!(verify(&before, &after, &[1], 10).is_err());
+    // A wrong artwork type, a non-store source, an empty or non-URL token,
+    // and a best token that does not match all refuse.
+    for art in [
+        "INSERT INTO artwork_token(entity_pid,artwork_token,artwork_source_type,artwork_type,entity_type)VALUES(13,'https://example.invalid/a.jpg',500,5,2);
+         INSERT INTO best_artwork_token(entity_pid,entity_type,artwork_type,available_artwork_token)VALUES(13,2,5,'https://example.invalid/a.jpg');",
+        "INSERT INTO artwork_token(entity_pid,artwork_token,artwork_source_type,artwork_type,entity_type)VALUES(13,'https://example.invalid/a.jpg',300,4,2);
+         INSERT INTO best_artwork_token(entity_pid,entity_type,artwork_type,available_artwork_token)VALUES(13,2,4,'https://example.invalid/a.jpg');",
+        "INSERT INTO artwork_token(entity_pid,artwork_token,artwork_source_type,artwork_type,entity_type)VALUES(13,'',500,4,2);
+         INSERT INTO best_artwork_token(entity_pid,entity_type,artwork_type,available_artwork_token)VALUES(13,2,4,'');",
+        "INSERT INTO artwork_token(entity_pid,artwork_token,artwork_source_type,artwork_type,entity_type)VALUES(13,'9967',500,4,2);
+         INSERT INTO best_artwork_token(entity_pid,entity_type,artwork_type,available_artwork_token)VALUES(13,2,4,'9967');",
+        "INSERT INTO artwork_token(entity_pid,artwork_token,artwork_source_type,artwork_type,entity_type)VALUES(13,'https://example.invalid/a.jpg',500,4,2);
+         INSERT INTO best_artwork_token(entity_pid,entity_type,artwork_type,available_artwork_token)VALUES(13,2,4,'https://example.invalid/other.jpg');",
+    ] {
+        let pair = Pair::new(ARTIST_REVISIONS, &format!("{resolution}{art}"));
+        let (before, after) = pair.tables();
+        assert!(verify(&before, &after, &[1], 10).is_err(), "{art}");
+    }
 }
 
 #[test]
