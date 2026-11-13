@@ -662,21 +662,7 @@ pub async fn run(
         },
     )
     .await
-    .with_context(|| {
-        if started_batches.load(Ordering::Relaxed) == 0 {
-            format!(
-                "nothing was removed: no removal batch started, so no batch is outstanding; \
-                 the run could not open its ATC session and the same command retries that step; \
-                 evidence: {}",
-                run.display()
-            )
-        } else {
-            format!(
-                "removal stopped; running the same command again settles an unfinished batch and continues; evidence: {}",
-                run.display()
-            )
-        }
-    })?;
+    .with_context(|| removal_stopped(started_batches.load(Ordering::Relaxed), &run))?;
     if let Some(id) = coordination {
         let batch = finish_clear(
             &journal_path,
@@ -722,6 +708,26 @@ pub async fn run(
         deleted_playlists,
         left: left.to_vec(),
     })
+}
+
+/// The error that stops a deletion after its removal session or a batch
+/// failed. With no batch started nothing is outstanding, so the same command
+/// retries the session; once one started, running it again settles the batch
+/// first and carries on.
+fn removal_stopped(started_batches: usize, evidence: &Path) -> String {
+    if started_batches == 0 {
+        format!(
+            "nothing was removed: no removal batch started, so no batch is outstanding; \
+             the run could not open its ATC session and the same command retries that step; \
+             evidence: {}",
+            evidence.display()
+        )
+    } else {
+        format!(
+            "removal stopped; running the same command again settles an unfinished batch and continues; evidence: {}",
+            evidence.display()
+        )
+    }
 }
 
 /// The removals a sync's removal leaves it: those that do not fill a batch,
@@ -1417,6 +1423,31 @@ mod tests {
             removal_batch::taken(&t.path(), &identity()).unwrap(),
             BTreeSet::from([7])
         );
+    }
+    /// A deletion that never started a batch leaves nothing outstanding, and
+    /// its error says so instead of offering to settle a batch that is not
+    /// there; one that did start a batch is settled by the next run.
+    #[test]
+    fn a_deletion_that_started_no_batch_does_not_offer_to_settle_one() {
+        let evidence = Path::new("/run/evidence");
+        let none = removal_stopped(0, evidence);
+        assert!(
+            none.starts_with(
+                "nothing was removed: no removal batch started, so no batch is outstanding"
+            ) && none.contains("the same command retries that step")
+                && none.ends_with("evidence: /run/evidence"),
+            "{none}"
+        );
+        assert!(!none.contains("settles an unfinished batch"), "{none}");
+        for started in [1, 2, 9] {
+            let some = removal_stopped(started, evidence);
+            assert!(
+                some.starts_with(
+                    "removal stopped; running the same command again settles an unfinished batch and continues"
+                ) && some.ends_with("evidence: /run/evidence"),
+                "{some}"
+            );
+        }
     }
     #[tokio::test]
     async fn cancelled_request_never_allocates_evidence_or_asks_for_confirmation() {
