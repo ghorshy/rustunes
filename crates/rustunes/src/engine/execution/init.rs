@@ -15,8 +15,9 @@
 //! repeated; this session cannot, so it carries as little as possible.
 //!
 //! The order keeps the phone unwritten until it has accepted the session:
-//! inspect and judge it (read-only), show the plan, connect ATC, and only at
-//! Ready write anything. There, a retry first removes what its interrupted
+//! inspect and judge it (read-only), show the plan, wait out the disk-usage
+//! refresh a first ATC link may start (`RunLink::settle`), inspect again,
+//! connect ATC, and only at Ready write anything. There, a retry first removes what its interrupted
 //! attempt left: its staged operation pair and any prefs file it was writing
 //! through `.tmp`, each only if it holds that attempt's bytes or the start of
 //! them. The phone gives this Ready only with its Media anchor still 0, so it
@@ -37,8 +38,7 @@ use anyhow::{Context, Result, bail, ensure};
 use music_protocol::{
     catalogue::{identity::LibraryIdentity, mutation, prefs::Prefs, sqlite::LibraryState},
     protocol::{
-        session::{self, Session},
-        templates,
+        session, templates,
         trace::private_write,
         transfer::{METADATA, SIGNATURE, Transfer},
     },
@@ -49,6 +49,8 @@ use tokio::time::{Instant, timeout};
 use crate::engine::{
     Engine,
     execution::device::{self, DeviceProvider},
+    execution::link::RunLink,
+    execution::native_insert::Control,
     state::{
         device_files,
         init_record::{self, InitRecord},
@@ -197,6 +199,21 @@ pub(crate) async fn run(
     if !confirm(&plan)? {
         bail!("init not confirmed; nothing was written to the iPhone");
     }
+    // A phone's first ATC link in ten minutes starts a disk-usage refresh
+    // that stalls a USB port 26–40 s later. Wait it out on a link of its own,
+    // as every other run does, so neither the confirmed inspection nor the
+    // session meets it. Nothing is written yet, and the phone is found again
+    // afterwards: a stalled port may have dropped it.
+    let mut link = RunLink::new(plan.run.join("link"));
+    link.settle(&engine.control(request.seconds)).await?;
+    let udid = provider.udid.clone();
+    let provider = timeout(Duration::from_secs(15), device::provider())
+        .await
+        .context("timed out discovering the device")??;
+    ensure!(
+        provider.udid == udid,
+        "another iPhone answered after the wait; nothing was written. Run init again"
+    );
     let control = engine.control(request.seconds);
     // The plan may have waited on the user: judge the phone again.
     let again = readiness::inspect(
@@ -221,7 +238,7 @@ pub(crate) async fn run(
         &again_work,
         (request.state, request.host_name),
         &device,
-        control.deadline,
+        (&mut link, &control),
         engine,
     )
     .await?;
@@ -475,9 +492,10 @@ async fn first_session(
     work: &Work,
     (state, host_name): (&Path, &str),
     device: &[u8; 32],
-    deadline: Instant,
+    (link, control): (&mut RunLink, &Control),
     engine: &Engine,
 ) -> Result<()> {
+    let deadline = control.deadline;
     let afc_trace = plan.run.join("afc");
     let atc_trace = plan.run.join("atc");
     for trace in [&afc_trace, &atc_trace] {
@@ -497,7 +515,17 @@ async fn first_session(
         0,
     )?;
     engine.check()?;
-    let mut session = Session::connect(provider, prepared, &atc_trace, deadline).await?;
+    // The session goes out on the link that waited out the refresh.
+    link.expect_transport(provider.transport());
+    let mut session = link
+        .begin(
+            prepared,
+            &atc_trace,
+            &provider.udid,
+            provider.transport(),
+            control,
+        )
+        .await?;
     let operation = mutation::first_session(
         record.database_pid,
         record.library_playlist_pid,

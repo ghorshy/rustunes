@@ -543,7 +543,7 @@ enum Command {
         /// The computer name written into the iPhone's prefs and sent in the session (printable ASCII, at most 63 characters).
         #[arg(long, default_value = "rustunes")]
         host_name: String,
-        /// Maximum time for the inspection, again for the session, and again for reading its result back.
+        /// Maximum time for the inspection, again for the wait before the session, again for the session, and again for reading its result back.
         #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..=1800))]
         seconds: u64,
     },
