@@ -86,10 +86,10 @@ const SCHEMA: &str = "rustunes.metadata-edit-sql";
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct RepresentativeMove {
-    class: &'static str,
-    group_pid: i64,
-    before: i64,
-    after: i64,
+    pub(crate) class: &'static str,
+    pub(crate) group_pid: i64,
+    pub(crate) before: i64,
+    pub(crate) after: i64,
 }
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct GroupOutcome {

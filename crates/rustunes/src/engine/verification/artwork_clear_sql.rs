@@ -16,14 +16,20 @@
 //!   new number must lie above the before state's highest revision.
 //! * A nonzero recent play or skip counter may reset to zero, as for a
 //!   metadata edit. Every other statistics cell is exact.
+//! * An album artist, artist or genre whose representative has no cover may
+//!   move it to the group's lowest member with one, as in any metadata edit
+//!   (`moves_to_covered`). The cleared track counts as coverless, so a group
+//!   it represented may move off it. Every other group cell is exact.
 //! * Every other table, including `artwork`, `item` and `item_extra`, is exact.
 //!
 //! Any other difference refuses; the caller keeps the full delta for review.
 use crate::engine::planning::metadata_edit::Tables;
+use crate::engine::verification::metadata_edit_sql::RepresentativeMove;
 use crate::engine::verification::sql_tables::reader::{Budget, Cell, Row, Table};
 use crate::engine::verification::{recent_counters, sql_values as typed};
 use anyhow::{Context, Result, bail, ensure};
 use music_protocol::catalogue::metadata_edit::decode;
+use music_protocol::catalogue::removal::{covered_items, moves_to_covered};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -48,6 +54,70 @@ pub(crate) struct VerifiedClear {
     pub(crate) album_revision: Option<i64>,
     pub(crate) property_changes: BTreeMap<&'static str, (String, String)>,
     pub(crate) recent_counter_resets: Vec<recent_counters::Reset>,
+    /// Coverless representatives the phone moved to their group's lowest
+    /// member with a cover.
+    pub(crate) covered_representatives: Vec<RepresentativeMove>,
+}
+
+/// The groups whose representative may move to a covered member, with the
+/// item column naming each one's group.
+const COVERED_GROUPS: [(&str, &str); 3] = [
+    ("album_artist", "album_artist_pid"),
+    ("item_artist", "item_artist_pid"),
+    ("genre", "genre_id"),
+];
+
+/// Take each album artist, artist or genre representative that moved off a
+/// coverless member to the group's lowest member with a cover. Covers are the
+/// before state's, without the cleared item's. No item changes group in this
+/// session (`item` must stay exact), so the before items are the members.
+fn absorb_covered_moves(
+    expected: &mut Tables,
+    before: &Tables,
+    after: &Tables,
+    item_pid: i64,
+) -> Result<Vec<RepresentativeMove>> {
+    let mut covered = covered_items(before)?;
+    covered.remove(&item_pid);
+    let items = table(before, "item")?;
+    let mut moves = Vec::new();
+    for (name, key) in COVERED_GROUPS {
+        let mut members: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
+        for row in items.rows.keys() {
+            members
+                .entry(typed::int(items, row, key)?)
+                .or_default()
+                .insert(typed::int(items, row, "item_pid")?);
+        }
+        let groups = table(before, name)?;
+        let after_groups = table(after, name)?;
+        for row in groups.rows.keys() {
+            let id = typed::int(groups, row, key)?;
+            let Ok(now_row) = after_groups.one(key, id) else {
+                continue;
+            };
+            let prior = typed::int(groups, row, "representative_item_pid")?;
+            let now = typed::int(after_groups, now_row, "representative_item_pid")?;
+            if prior == now || !moves_to_covered(name, prior, now, members.get(&id), &covered) {
+                continue;
+            }
+            let mut desired = row.clone();
+            typed::set(
+                groups,
+                &mut desired,
+                "representative_item_pid",
+                Cell::Integer(now),
+            )?;
+            typed::replace(expected, name, row, desired)?;
+            moves.push(RepresentativeMove {
+                class: name,
+                group_pid: id,
+                before: prior,
+                after: now,
+            });
+        }
+    }
+    Ok(moves)
 }
 
 fn table<'a>(tables: &'a Tables, name: &str) -> Result<&'a Table> {
@@ -412,6 +482,7 @@ pub(crate) fn verify(
     let property_changes = absorb_properties(&mut expected, after, base_anchor)?;
     let (item_revision, album_revision) =
         absorb_revisions(&mut expected, after, item_pid, album_pid)?;
+    let covered_representatives = absorb_covered_moves(&mut expected, before, after, item_pid)?;
 
     recent_counters::qualify(table(before, "item_stats")?)?;
     let resets = recent_counters::absorb(
@@ -443,6 +514,7 @@ pub(crate) fn verify(
         album_revision,
         property_changes,
         recent_counter_resets: resets,
+        covered_representatives,
     })
 }
 

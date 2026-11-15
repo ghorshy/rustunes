@@ -195,3 +195,60 @@ fn a_clear_without_a_target_row_is_a_no_op_clear() {
     assert_eq!(proof.cleared_artwork_token_rows, 0);
     assert_eq!(proof.cleared_best_artwork_token_rows, 0);
 }
+
+/// A clear is a metadata edit, so the phone may move a coverless
+/// representative to its group's lowest member with a cover (`moves_to_covered`).
+/// The cleared track has no cover afterwards: track 1 represents album artist
+/// 20 and genre Rock with track 2, which keeps its cover, and track 3
+/// represents artist 13 with track 4, given a cover here. Each move verifies
+/// on its own, and no other move does.
+#[test]
+fn a_clear_may_move_a_coverless_representative_to_the_lowest_covered_member() {
+    let session = |moves: &str| {
+        let world = artwork_world();
+        for path in [&world.fixture.before, &world.fixture.after] {
+            Connection::open(path)
+                .unwrap()
+                .execute_batch(
+                    "INSERT INTO artwork_token(entity_pid,artwork_token,artwork_source_type,artwork_type,entity_type,artwork_variant_type)
+                        VALUES(4,'200',300,6,0,0);",
+                )
+                .unwrap();
+        }
+        run(&world, &cleared_sql(moves))
+    };
+    let proof = session(
+        "UPDATE album_artist SET representative_item_pid=2 WHERE album_artist_pid=20;
+         UPDATE genre SET representative_item_pid=2 WHERE genre_id=31;
+         UPDATE item_artist SET representative_item_pid=4 WHERE item_artist_pid=13;",
+    )
+    .unwrap();
+    let moves: Vec<_> = proof
+        .covered_representatives
+        .iter()
+        .map(|m| (m.class, m.group_pid, m.before, m.after))
+        .collect();
+    assert_eq!(
+        moves,
+        [
+            ("album_artist", 20, 1, 2),
+            ("item_artist", 13, 3, 4),
+            ("genre", 31, 1, 2)
+        ]
+    );
+    let proof = session("UPDATE genre SET representative_item_pid=2 WHERE genre_id=31;").unwrap();
+    assert_eq!(proof.covered_representatives.len(), 1);
+    assert!(session("").unwrap().covered_representatives.is_empty());
+    for tamper in [
+        // A member without a cover.
+        "UPDATE album_artist SET representative_item_pid=5 WHERE album_artist_pid=20;",
+        // Off a representative that keeps its cover (track 2, of artist 12).
+        "UPDATE item_artist SET representative_item_pid=5 WHERE item_artist_pid=12;",
+        // An album: only album artists, artists and genres move so.
+        "UPDATE album SET representative_item_pid=1 WHERE album_pid=10;",
+        // A group with no covered member left (artist 11 holds track 1 alone).
+        "UPDATE item_artist SET representative_item_pid=0 WHERE item_artist_pid=11;",
+    ] {
+        assert!(session(tamper).is_err(), "{tamper}");
+    }
+}
