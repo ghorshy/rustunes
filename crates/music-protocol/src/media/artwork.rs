@@ -139,6 +139,29 @@ pub fn read(path: &Path) -> Result<SourceArtwork> {
     })
 }
 
+/// The whole `IEND` chunk that closes a PNG: no data and its fixed CRC.
+const PNG_END: [u8; 12] = [0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82];
+
+/// A JPEG or PNG picture without the zero bytes after its end marker (JPEG
+/// `FF D9`, PNG `IEND`). Taggers leave them (one `00` in every file seen);
+/// no reader takes anything after the marker, so the cover is the image
+/// before them, read, hashed and sent alike. Anything else after the marker,
+/// or zeros that do not follow a whole one, stay for the image's own check
+/// to refuse.
+pub(crate) fn without_trailing_zeros(image: &[u8]) -> &[u8] {
+    let end = image
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |last| last + 1);
+    let trimmed = &image[..end];
+    let closed = if image.starts_with(&crate::media::png::SIGNATURE) {
+        trimmed.ends_with(&PNG_END)
+    } else {
+        image.starts_with(&[0xff, 0xd8]) && trimmed.ends_with(&[0xff, 0xd9])
+    };
+    if closed { trimmed } else { image }
+}
+
 /// What an MP4 cover's checksum adds to its image length: the 16-byte `data`
 /// atom header and the picture count.
 pub const MP4_CHECKSUM_HEADER: u32 = 17;
@@ -251,6 +274,7 @@ fn image(source: &mut (impl Read + Seek), data: Atom) -> Result<Cover> {
     );
     let mut bytes = vec![0; usize::try_from(length)?];
     source.read_exact(&mut bytes)?;
+    bytes.truncate(without_trailing_zeros(&bytes).len());
     match header[3] {
         13 => ensure!(
             bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]),
@@ -265,8 +289,9 @@ fn image(source: &mut (impl Read + Seek), data: Atom) -> Result<Cover> {
                 .with_context(|| format!("embedded {} is invalid", format.name().to_uppercase()))?;
         }
     }
-    let checksum = u32::try_from(data.end - data.start)?
-        .checked_add(1)
+    // The `data` atom's length and the count, of the image as kept.
+    let checksum = u32::try_from(bytes.len())?
+        .checked_add(MP4_CHECKSUM_HEADER)
         .context("artwork checksum overflow")?;
     Ok(Cover {
         sha256: Sha256::digest(&bytes).into(),
@@ -365,6 +390,50 @@ mod tests {
         assert_eq!(cover.bytes, [0xff, 0xd8, 0xff, 0xd9]);
         assert_eq!(cover.checksum, 21); // 4 JPEG bytes + 16 data header + 1 count.
         assert_eq!(cover.sha256, <[u8; 32]>::from(Sha256::digest(&cover.bytes)));
+    }
+
+    /// Taggers leave zero bytes after an image's end marker (one `00` in
+    /// every file seen); they go, and only they.
+    #[test]
+    fn a_cover_loses_the_zero_bytes_after_its_end_marker() {
+        let png = crate::media::png::tests::png(6, 6);
+        let jpeg = [0xff, 0xd8, 0xff, 0xd9];
+        for image in [&jpeg[..], &png] {
+            for zeros in [1, 2] {
+                let padded = [image, &vec![0; zeros]].concat();
+                assert_eq!(without_trailing_zeros(&padded), image);
+            }
+            assert_eq!(without_trailing_zeros(image), image);
+            // Anything else after the end marker stays, and refuses later.
+            let other = [image, &[0, 1]].concat();
+            assert_eq!(without_trailing_zeros(&other), other);
+        }
+        // Zeros not after a whole end marker are the image's own.
+        for kept in [
+            &[0xff, 0xd8, 0xff, 0][..],
+            &[0xff, 0xd8, 0xd9, 0],
+            &[1, 0xff, 0xd9, 0],
+        ] {
+            assert_eq!(without_trailing_zeros(kept), kept);
+        }
+        let mut cut = png.clone();
+        cut.truncate(png.len() - 1);
+        cut.push(0);
+        assert_eq!(without_trailing_zeros(&cut), cut);
+
+        let padded = atom(
+            b"data",
+            &[0, 0, 0, 13, 0, 0, 0, 0, 0xff, 0xd8, 0xff, 0xd9, 0],
+        );
+        let cover = one(&source(&padded)).unwrap();
+        assert_eq!(cover.bytes, jpeg);
+        assert_eq!(cover.sha256, <[u8; 32]>::from(Sha256::digest(jpeg)));
+        assert_eq!(cover.checksum, 21);
+        let data = atom(
+            b"data",
+            &[&[0, 0, 0, 14, 0, 0, 0, 0][..], &png, &[0]].concat(),
+        );
+        assert_eq!(one(&source(&data)).unwrap().bytes, png);
     }
 
     #[test]

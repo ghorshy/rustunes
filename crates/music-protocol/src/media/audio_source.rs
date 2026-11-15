@@ -324,6 +324,7 @@ fn flac_picture(bytes: &[u8]) -> Result<(Picture, &[u8])> {
         .context("truncated FLAC picture data")?;
     ensure!(at + length == bytes.len(), "data after the FLAC picture");
     ensure!(kind <= 20, "invalid FLAC picture type");
+    let image = crate::media::artwork::without_trailing_zeros(image);
     let (held, (width, height)) = crate::media::mpeg::image_facts(&mime, image)?;
     Ok((
         Picture {
@@ -598,6 +599,11 @@ mod tests {
             assert_eq!(source.artwork.len(), 1);
             let cover = &source.artwork[0];
             assert_eq!((cover.mime, cover.width, cover.height), ("image/png", 5, 4));
+            std::fs::write(
+                &path,
+                flac_with_picture(b"image/png", &[&png[..], &[0]].concat()),
+            )?;
+            assert_eq!(read(&path)?.artwork[0].bytes, png.len());
             std::fs::write(&path, flac_with_picture(b"", b"not a picture"))?;
             assert!(read(&path).is_err());
             std::fs::write(&path, flac_with_picture(b"image/jpeg", &png))?;

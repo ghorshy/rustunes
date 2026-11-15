@@ -693,7 +693,7 @@ fn picture_payload(data: &[u8], version: u8) -> Result<(Picture, &[u8])> {
     } else {
         decode_text(encoding, &rest[..terminator], version)?
     };
-    let image = &rest[terminator + width..];
+    let image = crate::media::artwork::without_trailing_zeros(&rest[terminator + width..]);
     let (held, (w, h)) = image_facts(mime, image)?;
     Ok((
         Picture {

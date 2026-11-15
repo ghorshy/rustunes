@@ -297,6 +297,31 @@ fn apic_validates_exact_jpeg_and_has_no_native_checksum() {
     bad.pop();
     assert!(t.read(&tagged(vec![frame("APIC", &bad, 4)], 4)).is_err());
 }
+/// `Blue Boi.mp3` and `Me 2 (Feat. Julian Avila).mp3`: an ID3v2.3 `APIC`
+/// JPEG or PNG with one zero byte after its end marker. The cover is the
+/// image without it, read and sent alike.
+#[test]
+fn an_apic_cover_loses_the_zero_byte_after_its_end_marker() {
+    let t = Temp::new();
+    let jpeg = [
+        0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 2, 0, 3, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, 0xff,
+        0xda, 0, 12, 3, 1, 0, 2, 0, 3, 0, 0, 63, 0, 0, 0xff, 0xd9,
+    ];
+    let png = crate::media::png::tests::png(5, 4);
+    for (mime, image) in [(&b"image/jpeg"[..], &jpeg[..]), (b"image/png", &png)] {
+        let apic = [b"\x00", mime, b"\x00\x00\x00", image, &[0]].concat();
+        let s = t.read(&tagged(vec![frame("APIC", &apic, 3)], 3)).unwrap();
+        let p = &s.artwork[0];
+        assert_eq!(
+            (p.bytes, p.sha256.as_str()),
+            (image.len(), hex(&Sha256::digest(image)).as_str())
+        );
+        let captured = read_front_cover(&t.0.join("test.mp3"), &s)
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured.bytes(), image);
+    }
+}
 #[test]
 fn apic_reads_png_and_any_jpeg_kind_by_their_own_bytes() {
     let t = Temp::new();
