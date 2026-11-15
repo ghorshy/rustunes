@@ -90,8 +90,8 @@ pub(crate) fn reason(
     };
     match code {
         "source_inspection_failed" => {
-            "rustunes couldn't read it as a music file. Check that it plays, or encode it again."
-                .into()
+            let (problem, fix) = inspection_problem(message);
+            with_fixes(problem, vec![fix])
         }
         "source_changed_or_invalid" => {
             "it changed while rustunes was reading it. Sync again once nothing is writing to it."
@@ -433,10 +433,7 @@ fn validation_problem(code: &str, message: &str) -> (String, String) {
             "its cover image can't be read".into(),
             "Replace or remove the cover.".into(),
         ),
-        "source_inspection_failed" => (
-            "rustunes couldn't read it as a music file".into(),
-            "Check that it plays, or encode it again.".into(),
-        ),
+        "source_inspection_failed" => inspection_problem(message),
         _ => (
             format!("rustunes can't send it as it is ({message})"),
             String::new(),
@@ -482,6 +479,35 @@ fn projection_problem(message: &str) -> (String, String) {
 /// reported missing.
 fn invalid_text(field: &str) -> String {
     format!("its {field} tag holds a control character or is longer than 4,096 bytes")
+}
+
+/// A source no reader takes (`source_inspection_failed`): the tags that are
+/// not text when the MP4 reader names them
+/// (`music_protocol::media::metadata::NOT_TEXT`), else the file itself.
+fn inspection_problem(message: &str) -> (String, String) {
+    use music_protocol::media::metadata::NOT_TEXT;
+    if let Some((atoms, _)) = message
+        .split_once(NOT_TEXT)
+        .and_then(|(_, rest)| rest.strip_prefix('['))
+        .and_then(|rest| rest.split_once(']'))
+    {
+        let fields: Vec<_> = atoms
+            .split(", ")
+            .map(|atom| atom_field(atom.trim_matches('"')))
+            .collect();
+        let (fields, verb) = match fields.as_slice() {
+            [field] => (field.to_string(), "tag holds"),
+            _ => (fields.join(" and "), "tags hold"),
+        };
+        return (
+            format!("its {fields} {verb} bytes that are not valid text (UTF-8)"),
+            FIX_TAG.into(),
+        );
+    }
+    (
+        "rustunes couldn't read it as a music file".into(),
+        "Check that it plays, or encode it again.".into(),
+    )
 }
 
 /// The tag an MP4 metadata atom holds.

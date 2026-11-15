@@ -79,10 +79,7 @@ pub fn read(path: &Path) -> Result<Metadata> {
     );
     let mut reader = BufReader::new(file);
     let timing = crate::media::timing::read(&mut reader).context("parsing MP4 source timing")?;
-    let layout = standard_layout(&mut reader).context("reading standard atom layout")?;
-    reader.rewind()?;
-    let mp4 =
-        Mp4File::read_from(&mut reader, parse_options()).context("parsing MP4 source metadata")?;
+    let (layout, mp4) = parse_mp4(&mut reader).context("parsing MP4 source metadata")?;
     ensure!(
         layout.present
             || mp4
@@ -105,9 +102,7 @@ pub fn mp4_tags(
     crate::media::mpeg::Tags,
     Vec<crate::media::mpeg::FrameEvidence>,
 )> {
-    let layout = standard_layout(reader).context("reading standard atom layout")?;
-    reader.rewind()?;
-    let mp4 = Mp4File::read_from(reader, parse_options()).context("parsing MP4 metadata")?;
+    let (layout, mp4) = parse_mp4(reader).context("parsing MP4 metadata")?;
     ensure!(
         layout.present
             || mp4
@@ -161,6 +156,83 @@ pub fn mp4_tags(
         })
         .collect();
     Ok((tags, fields))
+}
+
+/// The text atoms a projection reads ([`mp4_tags`], `from_mp4`).
+const PROJECTED_TEXT: [[u8; 4]; 14] = [
+    *b"\xa9nam",
+    *b"\xa9ART",
+    *b"\xa9alb",
+    *b"aART",
+    *b"\xa9gen",
+    *b"\xa9wrt",
+    *b"cprt",
+    *b"\xa9day",
+    *b"\xa9cmt",
+    *b"sonm",
+    *b"soar",
+    *b"soal",
+    *b"soaa",
+    *b"soco",
+];
+
+/// How the refusal of a projected text atom that is not UTF-8 begins; the
+/// atoms follow as a list, `["cprt"]`.
+pub const NOT_TEXT: &str = "standard text atoms are not valid UTF-8: ";
+
+/// The file's standard layout and Lofty's reading of it. A text atom the
+/// projection reads that is not the UTF-8 it says refuses the file; any
+/// other (`desc` in `01 - Reckless.m4a`) reads as bytes, since Lofty in
+/// strict mode would refuse the whole file for an atom nothing sends.
+fn parse_mp4(reader: &mut (impl Read + Seek)) -> Result<(StandardLayout, Mp4File)> {
+    let layout = standard_layout(reader).context("reading standard atom layout")?;
+    let mut refused: Vec<String> = layout
+        .not_text
+        .iter()
+        .filter(|(name, _)| PROJECTED_TEXT.contains(name))
+        .map(|(name, _)| name.iter().map(|byte| char::from(*byte)).collect())
+        .collect();
+    refused.dedup();
+    ensure!(refused.is_empty(), "{NOT_TEXT}{refused:?}");
+    reader.rewind()?;
+    let mut retyped = Retyped {
+        inner: reader,
+        position: 0,
+        zeroed: layout.not_text.iter().map(|(_, at)| *at).collect(),
+    };
+    let mp4 = Mp4File::read_from(&mut retyped, parse_options())?;
+    Ok((layout, mp4))
+}
+
+/// A reader that shows each byte at `zeroed` as zero: the type of a `data`
+/// atom that is not the UTF-8 it says, so Lofty keeps its value as bytes
+/// (type 0) instead of refusing the file.
+struct Retyped<R> {
+    inner: R,
+    position: u64,
+    zeroed: Vec<u64>,
+}
+
+impl<R: Read> Read for Retyped<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buffer)?;
+        for at in &self.zeroed {
+            if let Some(index) = at.checked_sub(self.position)
+                && index < count as u64
+            {
+                buffer[index as usize] = 0;
+            }
+        }
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+
+impl<R: Seek> Seek for Retyped<R> {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.position = self.inner.seek(to)?;
+        Ok(self.position)
+    }
 }
 
 fn parse_options() -> ParseOptions {
@@ -610,6 +682,9 @@ struct StandardLayout {
     counts: BTreeMap<[u8; 4], usize>,
     compilation: Option<bool>,
     present: bool,
+    /// Each `data` value typed UTF-8 (1) that is not: its atom, and where
+    /// its type byte is.
+    not_text: Vec<([u8; 4], u64)>,
 }
 
 /// Read only box headers and the bounded cpil body. Lofty's boolean reader
@@ -672,6 +747,24 @@ fn standard_layout(source: &mut (impl Read + Seek)) -> Result<StandardLayout> {
     };
     for atom in level {
         *result.counts.entry(atom.name).or_default() += 1;
+        // An atom that holds no plain list of children is left to Lofty.
+        for value in children(source, atom.body, atom.end)
+            .unwrap_or_default()
+            .iter()
+            .filter(|value| value.name == *b"data" && value.end - value.body >= 8)
+        {
+            source.seek(SeekFrom::Start(value.body))?;
+            let mut head = [0; 8];
+            source.read_exact(&mut head)?;
+            if head[..4] != [0, 0, 0, 1] {
+                continue;
+            }
+            let mut text = vec![0; usize::try_from(value.end - value.body - 8)?];
+            source.read_exact(&mut text)?;
+            if std::str::from_utf8(&text).is_err() {
+                result.not_text.push((atom.name, value.body + 3));
+            }
+        }
         if atom.name == *b"cpil" {
             ensure!(
                 result.compilation.is_none(),
@@ -844,6 +937,47 @@ mod tests {
     // matching atoms and would conceal this reader regression.
     use crate::test_support::mp4::append_outer;
 
+    /// `01 - Reckless.m4a`: `desc` and `cprt` typed UTF-8 but holding
+    /// `17 A9 20 …` (a Latin-1 `©`). An atom no projection reads does not
+    /// refuse the file; a projected one refuses it by name, in both readers.
+    #[test]
+    fn a_text_atom_that_is_not_utf8_refuses_only_when_it_is_projected() {
+        const LATIN1: &[u8] = b"\x17\xa9 KAISUI";
+        let plain = parsed(ALAC.to_vec()).unwrap();
+        let mut unread = ALAC.to_vec();
+        append_outer(&mut unread, b"desc", 1, LATIN1);
+        let read = parsed(unread.clone()).unwrap();
+        assert_eq!(read.projected().unwrap(), plain.projected().unwrap());
+        assert_eq!(read.standard_atom_counts.get(b"desc"), Some(&1));
+        let (tags, _) = mp4_tags(&mut Cursor::new(&unread)).unwrap();
+        let (plain_tags, _) = mp4_tags(&mut Cursor::new(ALAC)).unwrap();
+        assert_eq!(tags, plain_tags);
+        // Valid UTF-8 in an unread atom is read as before.
+        let mut valid = ALAC.to_vec();
+        append_outer(&mut valid, b"desc", 1, "© KAISUI".as_bytes());
+        assert!(parsed(valid).is_ok());
+
+        let mut projected = unread;
+        append_outer(&mut projected, b"cprt", 1, LATIN1);
+        for error in [
+            parsed(projected.clone()).unwrap_err(),
+            mp4_tags(&mut Cursor::new(&projected)).unwrap_err(),
+        ] {
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(&format!("{NOT_TEXT}[\"cprt\"]")),
+                "{message}"
+            );
+        }
+        let mut title = ALAC.to_vec();
+        append_outer(&mut title, b"\xa9nam", 1, LATIN1);
+        let message = format!("{:#}", parsed(title).unwrap_err());
+        assert!(
+            message.contains(&format!("{NOT_TEXT}[\"©nam\"]")),
+            "{message}"
+        );
+    }
+
     #[test]
     fn repeated_outer_atoms_preserve_text_order_and_reject_ambiguous_singletons() {
         let mut bytes = ALAC.to_vec();
@@ -943,9 +1077,7 @@ mod tests {
     fn parsed(bytes: Vec<u8>) -> Result<Metadata> {
         let mut file = Cursor::new(bytes);
         let timing = crate::media::timing::read(&mut file)?;
-        let layout = standard_layout(&mut file)?;
-        file.rewind()?;
-        let mp4 = Mp4File::read_from(&mut file, parse_options())?;
+        let (layout, mp4) = parse_mp4(&mut file)?;
         let mut metadata = from_mp4(&mp4, timing)?;
         metadata.standard_atom_counts = layout.counts;
         metadata.compilation = layout.compilation;

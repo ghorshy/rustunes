@@ -75,6 +75,31 @@ fn a_refused_tag_reads_as_what_is_wrong_and_how_to_fix_it() {
     );
 }
 
+/// `01 - Reckless.m4a`, as `refused_m4a` words it: the MP4 reader names
+/// the projected tags that are not text, and the reason names them too.
+#[test]
+fn an_unreadable_file_names_the_tag_that_is_not_text() {
+    use music_protocol::media::metadata::NOT_TEXT;
+    let reckless = format!(
+        "not ALAC (parsing MP4 source timing: source must contain unprotected ALAC audio), nor AAC (parsing MP4 metadata: {NOT_TEXT}[\"cprt\"])"
+    );
+    assert_eq!(
+        inspection_problem(&reckless),
+        (
+            "its copyright tag holds bytes that are not valid text (UTF-8)".into(),
+            FIX_TAG.into()
+        )
+    );
+    assert_eq!(
+        inspection_problem(&format!("{NOT_TEXT}[\"©nam\", \"cprt\"]")).0,
+        "its title and copyright tags hold bytes that are not valid text (UTF-8)"
+    );
+    assert_eq!(
+        inspection_problem("not ALAC (x), nor AAC (y)").0,
+        "rustunes couldn't read it as a music file"
+    );
+}
+
 #[test]
 fn an_alac_validation_error_reads_as_the_tag_to_fix() {
     for (code, message, reason) in [
