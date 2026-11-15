@@ -20,8 +20,10 @@ use std::{
 use tokio::time::{Instant, timeout_at};
 
 use crate::engine::execution::device;
-use crate::engine::execution::native_insert::{Control, create_trace};
+use crate::engine::execution::native_insert::{Control, create_trace, durable_write};
 use crate::engine::execution::removal_batch::next_directory;
+
+mod refresh;
 
 /// The phone starts a full refresh when a link opens if the last one is over
 /// 600 s old, then stalls the port 26–40 s in (E4 27 s, E1 28.8 s, E3 33.7 s,
@@ -136,16 +138,42 @@ impl RunLink {
     /// stall closes the link, and a wait that ends in silence cannot resume
     /// the receive. Nothing is Started either way, so no batch is at risk;
     /// and because the phone has just refreshed, the new link is partial.
+    ///
+    /// The phone's system log says which refresh the link started
+    /// (`refresh`): after a partial one only what is left of the last full
+    /// one's window is waited, and none when it has passed, keeping this
+    /// link. Without the log the whole window is waited.
     pub(crate) async fn settle(&mut self, control: &Control) -> Result<()> {
         if !self.fresh {
             return Ok(());
         }
         self.fresh = false;
+        // Started first, so the relay holds what atc says about the link.
+        let syslog = refresh::Syslog::start(control).await;
         // The refresh starts when this first link opens, not before.
         self.open(control).await?;
+        let (said, evidence) = match syslog {
+            Ok(syslog) => {
+                let (refresh, verdict) = syslog.verdict(control).await;
+                (refresh, verdict.lines.join("\n"))
+            }
+            Err(error) => (None, format!("{error:#}")),
+        };
+        let due = refresh::still_due(said, STALL_WINDOW);
+        let _ = durable_write(
+            &self.directory,
+            "refresh.txt",
+            format!(
+                "refresh: {said:?}\nwaiting for a stall: {:.1} s\n{evidence}\n",
+                due.as_secs_f64()
+            )
+            .as_bytes(),
+        );
+        if due.is_zero() {
+            return Ok(());
+        }
         if let Some(mut link) = self.link.take() {
-            let window =
-                STALL_WINDOW.min(control.deadline.saturating_duration_since(Instant::now()));
+            let window = due.min(control.deadline.saturating_duration_since(Instant::now()));
             // The phone stops pinging when it stalls; waiting for the socket
             // to close only works with a daemon that closes it.
             link.wait_lost_with_quiet(window, LINK_HEARTBEAT.min(window))
