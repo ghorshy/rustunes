@@ -155,16 +155,37 @@ impl Earlier<'_> {
                             BatchState::Cancelled
                         }
                         // A batch of an earlier run: the phone may have been
-                        // played since.
+                        // played since. A failed observation is made again,
+                        // as `resume` would.
                         _ => {
-                            removal_batch::settle(
-                                &mut journal,
-                                identity,
-                                &batch,
-                                Window::LaterRun,
-                                &control,
-                            )
-                            .await
+                            let mut attempt = 1;
+                            loop {
+                                match removal_batch::settle(
+                                    &mut journal,
+                                    identity,
+                                    &batch,
+                                    Window::LaterRun,
+                                    &control,
+                                )
+                                .await
+                                {
+                                    Ok(settled) => break Ok(settled),
+                                    Err(error) => {
+                                        if !removal_batch::observe_again(
+                                            &batch.evidence,
+                                            || format!("Removal batch {id}"),
+                                            attempt,
+                                            &error,
+                                            &control,
+                                        )
+                                        .await
+                                        {
+                                            break Err(error);
+                                        }
+                                        attempt += 1;
+                                    }
+                                }
+                            }
                             .with_context(not_settled)?
                             .state
                         }
@@ -193,15 +214,36 @@ impl Earlier<'_> {
                     journal.cancel_metadata_batch(batch.id)?;
                     MetadataBatchState::Cancelled
                 }
+                // A failed observation is made again, as `resume` would.
                 _ => {
-                    metadata_batch::settle(
-                        &mut journal,
-                        identity,
-                        &batch,
-                        Window::LaterRun,
-                        &control,
-                    )
-                    .await
+                    let mut attempt = 1;
+                    loop {
+                        match metadata_batch::settle(
+                            &mut journal,
+                            identity,
+                            &batch,
+                            Window::LaterRun,
+                            &control,
+                        )
+                        .await
+                        {
+                            Ok(settled) => break Ok(settled),
+                            Err(error) => {
+                                if !removal_batch::observe_again(
+                                    &batch.evidence,
+                                    || format!("Metadata batch {}", batch.id.as_i64()),
+                                    attempt,
+                                    &error,
+                                    &control,
+                                )
+                                .await
+                                {
+                                    break Err(error);
+                                }
+                                attempt += 1;
+                            }
+                        }
+                    }
                     .with_context(not_settled)?
                     .state
                 }

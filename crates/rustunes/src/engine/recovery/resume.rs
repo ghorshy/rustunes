@@ -155,14 +155,36 @@ async fn resume_batch(
             (BatchState::Cancelled, batch.evidence.clone(), 0, 0)
         }
         BatchState::Started => {
-            let settled = removal_batch::settle(
-                &mut journal,
-                identity,
-                &batch,
-                crate::engine::recovery::retained::playback::Window::LaterRun,
-                control,
-            )
-            .await?;
+            // The same window a run's own observation gets: a phone that was
+            // reconnected while resume started is waited for, not refused.
+            let mut attempt = 1;
+            let settled = loop {
+                match removal_batch::settle(
+                    &mut journal,
+                    identity,
+                    &batch,
+                    crate::engine::recovery::retained::playback::Window::LaterRun,
+                    control,
+                )
+                .await
+                {
+                    Ok(settled) => break Ok(settled),
+                    Err(error) => {
+                        if !removal_batch::observe_again(
+                            &batch.evidence,
+                            || format!("Removal batch {id}"),
+                            attempt,
+                            &error,
+                            control,
+                        )
+                        .await
+                        {
+                            break Err(error);
+                        }
+                        attempt += 1;
+                    }
+                }
+            }?;
             (
                 settled.state,
                 settled.evidence,
@@ -295,7 +317,10 @@ async fn resume_metadata_batch(
     batch: crate::engine::state::journal::MetadataBatchRecord,
     control: &Control,
 ) -> Result<Report> {
-    use crate::{engine::execution::metadata_batch, engine::state::journal::MetadataBatchState};
+    use crate::{
+        engine::execution::metadata_batch, engine::execution::removal_batch,
+        engine::state::journal::MetadataBatchState,
+    };
     let mut journal = Journal::open(journal_path, identity)?;
     let id = batch.id.as_i64();
     let (state, evidence, updated) = match batch.state {
@@ -304,14 +329,36 @@ async fn resume_metadata_batch(
             (MetadataBatchState::Cancelled, batch.evidence.clone(), 0)
         }
         MetadataBatchState::Started => {
-            let settled = metadata_batch::settle(
-                &mut journal,
-                identity,
-                &batch,
-                crate::engine::recovery::retained::playback::Window::LaterRun,
-                control,
-            )
-            .await?;
+            // The same window a run's own observation gets: a phone that was
+            // reconnected while resume started is waited for, not refused.
+            let mut attempt = 1;
+            let settled = loop {
+                match metadata_batch::settle(
+                    &mut journal,
+                    identity,
+                    &batch,
+                    crate::engine::recovery::retained::playback::Window::LaterRun,
+                    control,
+                )
+                .await
+                {
+                    Ok(settled) => break Ok(settled),
+                    Err(error) => {
+                        if !removal_batch::observe_again(
+                            &batch.evidence,
+                            || format!("Metadata batch {id}"),
+                            attempt,
+                            &error,
+                            control,
+                        )
+                        .await
+                        {
+                            break Err(error);
+                        }
+                        attempt += 1;
+                    }
+                }
+            }?;
             (settled.state, settled.evidence, settled.updated)
         }
         other => anyhow::bail!("metadata batch {id} is {other:?} and needs no recovery"),

@@ -54,7 +54,9 @@ from the protocol analysis to the code.
   compared. Tracks it did not touch are checked too: their audio, play counts,
   ratings and playlists must survive.
 - **Safe to interrupt:** every write is journaled first. Kill a run, pull the
-  cable or lose Wi-Fi, then run the same command again.
+  cable or lose Wi-Fi, then run the same command again; a batch it cannot
+  observe is observed again three times, ten seconds apart, so a cable plugged
+  back in lets that same run carry on.
 - **Leaves the rest alone:** it only changes tracks it sent or adopted, and it
   never modifies your music files.
 - **USB or Wi-Fi:** the same commands work over both. Over Wi-Fi the phone can
