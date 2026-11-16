@@ -130,6 +130,9 @@ pub struct Planner {
     occupied: BTreeSet<u64>,
     artists: Vec<Artist>,
     albums: Vec<Album>,
+    /// The artist PID this plan's tracks without an artist send. The phone
+    /// makes no group for it, so it is never a new collection.
+    no_artist: Option<u64>,
     planned_tracks: usize,
 }
 
@@ -176,6 +179,7 @@ impl Planner {
                     pending: false,
                 })
                 .collect(),
+            no_artist: None,
             planned_tracks: 0,
         }
     }
@@ -236,38 +240,61 @@ impl Planner {
             Ok(pid)
         };
         let track = allocate(candidates.track, &mut allocated)?;
-        let matching_artists: Vec<_> = self
-            .artists
-            .iter()
-            .filter(|a| same_name(&a.name, scalar.artist))
-            .collect();
-        ensure!(
-            matching_artists.iter().all(|a| a.pid != 0),
-            "album artist {:?} has no sync id and cannot be joined",
-            scalar.artist
-        );
-        ensure!(
-            matching_artists.len() <= 1,
-            "ambiguous artist grouping; no new identity allocated"
-        );
-        let (artist, new_artist, pending_artist) = if let Some(found) = matching_artists.first() {
-            (found.pid, false, found.pending)
-        } else {
-            (
-                allocate(
+        // A track with neither an artist nor an album artist: the phone files
+        // it under no album artist and makes no group for the artist PID the
+        // insert sends (variant A, 2026-11-16). Every such track of the plan
+        // sends one PID, and its album is one under no album artist.
+        let (artist, album_artist, new_artist, pending_artist) = if scalar.artist.is_empty() {
+            ensure!(
+                scalar.compilation != Some(true),
+                "a compilation needs an artist or an album artist"
+            );
+            let artist = match self.no_artist {
+                Some(pid) => pid,
+                None => allocate(
                     candidates
                         .artist
                         .context("new artist candidate PID required")?,
                     &mut allocated,
                 )?,
-                true,
-                false,
-            )
+            };
+            (artist, None, false, false)
+        } else {
+            let matching_artists: Vec<_> = self
+                .artists
+                .iter()
+                .filter(|a| same_name(&a.name, scalar.artist))
+                .collect();
+            ensure!(
+                matching_artists.iter().all(|a| a.pid != 0),
+                "album artist {:?} has no sync id and cannot be joined",
+                scalar.artist
+            );
+            ensure!(
+                matching_artists.len() <= 1,
+                "ambiguous artist grouping; no new identity allocated"
+            );
+            let (artist, new_artist, pending_artist) = if let Some(found) = matching_artists.first()
+            {
+                (found.pid, false, found.pending)
+            } else {
+                (
+                    allocate(
+                        candidates
+                            .artist
+                            .context("new artist candidate PID required")?,
+                        &mut allocated,
+                    )?,
+                    true,
+                    false,
+                )
+            };
+            (artist, Some(artist), new_artist, pending_artist)
         };
         let matching_albums: Vec<_> = self
             .albums
             .iter()
-            .filter(|a| a.artist == Some(artist) && same_name(&a.name, scalar.album))
+            .filter(|a| a.artist == album_artist && same_name(&a.name, scalar.album))
             .collect();
         ensure!(
             matching_albums.iter().all(|a| a.pid != 0),
@@ -313,6 +340,9 @@ impl Planner {
                 pending_collection_ids.insert(id);
             }
         }
+        if album_artist.is_none() {
+            self.no_artist = Some(artist);
+        }
         if new_artist {
             self.artists.push(Artist {
                 name: scalar.artist.into(),
@@ -324,7 +354,7 @@ impl Planner {
             self.albums.push(Album {
                 name: scalar.album.into(),
                 pid: album,
-                artist: Some(artist),
+                artist: album_artist,
                 compilation_group: scalar.compilation == Some(true),
                 has_compilation_tracks: scalar.compilation == Some(true),
                 pending: true,
@@ -415,6 +445,7 @@ mod tests {
                 has_compilation_tracks: false,
                 pending: false,
             }],
+            no_artist: None,
             planned_tracks: 0,
         }
     }
@@ -424,6 +455,58 @@ mod tests {
             album: Some(9000),
             artist: Some(8000),
         }
+    }
+
+    /// Tracks without an artist send one artist PID the phone makes no group
+    /// for, so it is never a new collection; their albums are under no album
+    /// artist, one per name, and an existing one is joined (variant A).
+    #[test]
+    fn tracks_without_an_artist_share_one_artist_pid_and_albums_under_none() {
+        let mut p = planner();
+        p.albums.push(Album {
+            name: "Left over".into(),
+            pid: 3500,
+            artist: None,
+            compilation_group: false,
+            has_compilation_tracks: false,
+            pending: false,
+        });
+        let untagged = |album: &str| {
+            let mut source = source();
+            source.artist.clear();
+            source.album = if album.is_empty() {
+                Vec::new()
+            } else {
+                vec![album.into()]
+            };
+            source
+        };
+        let ids = |track: u64| CandidateIds {
+            track,
+            album: Some(track + 8000),
+            artist: Some(track + 7000),
+        };
+        let first = p.plan(&untagged(""), ids(1001)).unwrap();
+        assert_eq!((first.artist_pid(), first.album_pid()), (8001, 9001));
+        assert_eq!(first.new_collection_ids(), &BTreeSet::from([9001]));
+        // A second track sends the same artist PID and joins the plan's
+        // album without a name; the album with the name an artist has
+        // (`Example album`, under 2000) is not joined.
+        let second = p.plan(&untagged(""), ids(1002)).unwrap();
+        assert_eq!((second.artist_pid(), second.album_pid()), (8001, 9001));
+        assert!(second.new_collection_ids().is_empty());
+        assert_eq!(second.pending_collection_ids(), &BTreeSet::from([9001]));
+        let named = p.plan(&untagged("Example album"), ids(1003)).unwrap();
+        assert_eq!((named.artist_pid(), named.album_pid()), (8001, 9003));
+        assert_eq!(named.new_collection_ids(), &BTreeSet::from([9003]));
+        // An album under no album artist already on the phone is joined.
+        let left = p.plan(&untagged("Left over"), ids(1004)).unwrap();
+        assert_eq!(left.album_pid(), 3500);
+        assert!(left.new_collection_ids().is_empty());
+        // A compilation needs a name to group it.
+        let mut compilation = untagged("");
+        compilation.compilation = Some(true);
+        assert!(p.plan(&compilation, ids(1005)).is_err());
     }
 
     #[test]
