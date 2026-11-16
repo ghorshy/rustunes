@@ -180,7 +180,7 @@ fn matches(track: &Track, filter: &Filter) -> bool {
 fn track_json(catalog: &Catalog, track: &Track) -> Value {
     let m = &track.metadata;
     json!({"id":format!("{:016x}",track.sync_id),"album_id":format!("{:016x}",track.album_sync_id),
-        "artist_id":format!("{:016x}",track.artist_sync_id),"title":m.title,
+        "artist_id":track.artist_sync_id.map(|id| format!("{id:016x}")),"title":m.title,
         "sort_title":catalog.title_sort(track.sync_id),"artist":m.artist,"album":m.album,
         "album_artist":m.album_artist,"genre":m.genre,"composer":m.composer,"copyright":m.copyright,
         "comment":catalog.comment(track.sync_id),

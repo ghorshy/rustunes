@@ -397,7 +397,7 @@ fn source_metadata_binding_rejects_forged_or_stale_complete_before_state() {
             11 => forged.title.before.sort_name.push('!'),
             12 => forged.before.metadata.composer = None,
             13 => forged.before.metadata.year += 1,
-            14 => forged.before.artist_sync_id = 0,
+            14 => forged.before.artist_sync_id = None,
             15 => forged.before.playback.user_rating += 1,
             _ => forged.before.afc_path = None,
         }

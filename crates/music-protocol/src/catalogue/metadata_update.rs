@@ -165,7 +165,7 @@ pub fn bind_source_metadata(catalog: &Catalog, target: u64) -> Result<SourceMeta
     let title = bind_title(catalog, target)?;
     let before = target_track(catalog, target)?.clone();
     ensure!(
-        before.artist_sync_id != 0,
+        before.artist_sync_id.is_some_and(|id| id != 0),
         "source metadata artist identity missing"
     );
     Ok(SourceMetadataBinding { title, before })
@@ -221,7 +221,7 @@ fn normalize_source_metadata_item(
     title_text(before_sort)?;
     ensure!(before.album_sync_id != 0, "title album identity missing");
     ensure!(
-        before.artist_sync_id != 0,
+        before.artist_sync_id.is_some_and(|id| id != 0),
         "source metadata artist identity missing"
     );
     reject_unsupported_source_fields(patch)?;

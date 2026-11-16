@@ -10,7 +10,7 @@ pub(super) fn current_fields(catalog: &Catalog, track: &Track) -> Value {
     json!({
         "track_id":format!("{:016x}",track.sync_id),
         "album_id":format!("{:016x}",track.album_sync_id),
-        "artist_id":format!("{:016x}",track.artist_sync_id),
+        "artist_id":track.artist_sync_id.map(|id| format!("{id:016x}")),
         "path":track.afc_path,"file_bytes":m.file_size,
         "title":m.title,"sort_name":catalog.title_sort(track.sync_id),
         "artist":m.artist,"album":m.album,"grouping_artist":m.album_artist,

@@ -118,7 +118,8 @@ struct Artist {
 struct Album {
     name: String,
     pid: u64,
-    artist: u64,
+    /// None for an album under no album artist.
+    artist: Option<u64>,
     compilation_group: bool,
     has_compilation_tracks: bool,
     pending: bool,
@@ -266,7 +267,7 @@ impl Planner {
         let matching_albums: Vec<_> = self
             .albums
             .iter()
-            .filter(|a| a.artist == artist && same_name(&a.name, scalar.album))
+            .filter(|a| a.artist == Some(artist) && same_name(&a.name, scalar.album))
             .collect();
         ensure!(
             matching_albums.iter().all(|a| a.pid != 0),
@@ -323,7 +324,7 @@ impl Planner {
             self.albums.push(Album {
                 name: scalar.album.into(),
                 pid: album,
-                artist,
+                artist: Some(artist),
                 compilation_group: scalar.compilation == Some(true),
                 has_compilation_tracks: scalar.compilation == Some(true),
                 pending: true,
@@ -409,7 +410,7 @@ mod tests {
             albums: vec![Album {
                 name: "Example album".into(),
                 pid: 3000,
-                artist: 2000,
+                artist: Some(2000),
                 compilation_group: false,
                 has_compilation_tracks: false,
                 pending: false,

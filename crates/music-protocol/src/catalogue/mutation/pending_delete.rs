@@ -130,7 +130,7 @@ fn check_target(catalog: &Catalog, expected: &Track, destination: &str) -> Resul
     ensure!(
         track.internal_id != 0
             && track.album_sync_id != 0
-            && track.artist_sync_id != 0
+            && track.artist_sync_id != Some(0)
             && track.afc_path.is_none()
             && track.metadata.file_size == 0
             && !state.has_non_purgeable_asset

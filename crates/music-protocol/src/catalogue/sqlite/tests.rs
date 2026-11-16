@@ -555,40 +555,146 @@ fn missing_or_conflicting_joins_fail() {
     }
 }
 
-/// The phone's leftovers after tracks sent with an empty artist were deleted:
-/// two albums without an album artist sharing one sync_id (observed
-/// 2026-11-16).
-const ARTISTLESS_ALBUMS: &str = "INSERT INTO album VALUES(33,-33,'',0,0,NULL);
-    INSERT INTO album VALUES(34,-33,'',0,0,NULL);";
+/// The rows the phone wrote for tracks sent with an empty artist (variant A,
+/// 2026-11-16): no album_artist or item_artist row, `album_artist_pid` and
+/// `item_artist_pid` 0. Track 2 has an album; tracks 3 and 4 have none and
+/// got one album row each, both with the album's one sync_id.
+const ARTISTLESS: &str = "INSERT INTO album VALUES(33,-33,'That Brownin',0,0,NULL);
+    INSERT INTO album VALUES(34,-34,'',0,0,NULL);
+    INSERT INTO album VALUES(35,-34,'',0,0,NULL);
+    INSERT INTO item VALUES(2,8,33,0,0,0,0,51,0,0,0,0,0);
+    INSERT INTO item VALUES(3,8,34,0,0,0,0,51,0,0,0,0,0);
+    INSERT INTO item VALUES(4,8,35,0,0,0,0,51,0,0,0,0,0);
+    INSERT INTO item_extra VALUES(2,'Bo','B.mp3',1000.0,10,0,0,0,NULL,0,0,'Bo',NULL);
+    INSERT INTO item_extra VALUES(3,'D','D.wav',1000.0,10,0,0,0,NULL,0,0,'D',NULL);
+    INSERT INTO item_extra VALUES(4,'V','V.m4a',1000.0,10,0,0,0,NULL,0,0,'V',NULL);
+    INSERT INTO item_store VALUES(2,-2);
+    INSERT INTO item_store VALUES(3,-3);
+    INSERT INTO item_store VALUES(4,-4);
+    INSERT INTO item_state VALUES(2,0,1,1,1);
+    INSERT INTO item_state VALUES(3,0,1,1,1);
+    INSERT INTO item_state VALUES(4,0,1,1,1);
+    INSERT INTO item_stats VALUES(2,0,0,0,0,0,0,0,0);
+    INSERT INTO item_stats VALUES(3,0,0,0,0,0,0,0,0);
+    INSERT INTO item_stats VALUES(4,0,0,0,0,0,0,0,0);";
+
+const ARTISTLESS_TRACKS: [u64; 3] = [-2i64 as u64, -3i64 as u64, -4i64 as u64];
 
 #[test]
-fn an_empty_album_without_an_album_artist_is_left_out() {
+fn tracks_sent_with_an_empty_artist_read_under_no_album_artist() {
     let fixture = Fixture::new(false);
     let before = fixture.read(false).unwrap();
-    fixture.connection.execute_batch(ARTISTLESS_ALBUMS).unwrap();
+    fixture.connection.execute_batch(ARTISTLESS).unwrap();
     let catalog = fixture.read(false).unwrap();
-    assert_eq!(catalog.tracks(), before.tracks());
+    let artistless: Vec<_> = catalog
+        .tracks()
+        .iter()
+        .filter(|track| ARTISTLESS_TRACKS.contains(&track.sync_id))
+        .collect();
+    assert_eq!(artistless.len(), 3);
+    for track in &artistless {
+        assert_eq!(track.artist_sync_id, None);
+        assert_eq!(
+            (
+                track.metadata.artist.as_str(),
+                track.metadata.album_artist.as_str()
+            ),
+            ("", "")
+        );
+    }
+    let album = |sync_id: i64| {
+        let found: Vec<_> = catalog
+            .albums()
+            .values()
+            .filter(|album| album.sync_id == sync_id as u64)
+            .collect();
+        assert_eq!(found.len(), 1, "{sync_id}");
+        found[0].clone()
+    };
+    let named = album(-33);
     assert_eq!(
-        catalog.albums().keys().collect::<Vec<_>>(),
-        before.albums().keys().collect::<Vec<_>>()
+        (
+            named.name.as_str(),
+            named.artist_sync_id,
+            named.live_track_count
+        ),
+        ("That Brownin", None, 1)
     );
-    assert!(catalog.unsynced_albums().is_empty());
+    // The two rows sharing a sync_id read as one album holding both tracks.
+    let unnamed = album(-34);
+    assert_eq!(
+        (
+            unnamed.internal_id,
+            unnamed.name.as_str(),
+            unnamed.live_track_count
+        ),
+        (34, "", 2)
+    );
+    assert!(!catalog.albums().contains_key(&35));
+    assert_eq!(
+        artistless
+            .iter()
+            .map(|track| (track.sync_id, track.album_sync_id))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            (ARTISTLESS_TRACKS[0], -33i64 as u64),
+            (ARTISTLESS_TRACKS[1], -34i64 as u64),
+            (ARTISTLESS_TRACKS[2], -34i64 as u64),
+        ])
+    );
+    // The album artists are as they were.
+    assert_eq!(
+        catalog.artists().keys().collect::<Vec<_>>(),
+        before.artists().keys().collect::<Vec<_>>()
+    );
+    assert_eq!(catalog.artists()[&21].live_track_count, 1);
+}
+
+/// The phone keeps the albums after the tracks are deleted (observed
+/// 2026-11-16).
+#[test]
+fn empty_albums_without_an_album_artist_read_and_removal_keeps_them() {
+    let fixture = Fixture::new(false);
+    fixture.connection.execute_batch(ARTISTLESS).unwrap();
+    let before = fixture.read(false).unwrap();
+    let projected = before
+        .without_tracks(&BTreeSet::from(ARTISTLESS_TRACKS), &before)
+        .unwrap();
+    assert_eq!(projected.albums()[&33].live_track_count, 0);
+    assert_eq!(projected.albums()[&34].live_track_count, 0);
+    fixture
+        .connection
+        .execute_batch(
+            "DELETE FROM item WHERE item_pid>1; DELETE FROM item_extra WHERE item_pid>1;
+            DELETE FROM item_store WHERE item_pid>1; DELETE FROM item_state WHERE item_pid>1;
+            DELETE FROM item_stats WHERE item_pid>1;",
+        )
+        .unwrap();
+    let emptied = fixture.read(false).unwrap();
+    assert_eq!(emptied.albums()[&33].live_track_count, 0);
+    assert_eq!(emptied.albums()[&34].live_track_count, 0);
+    assert!(!emptied.albums().contains_key(&35));
 }
 
 #[test]
-fn a_track_in_an_album_without_an_album_artist_refuses() {
-    let fixture = Fixture::new(false);
-    fixture
-        .connection
-        .execute_batch(&format!(
-            "{ARTISTLESS_ALBUMS} UPDATE item SET album_pid=33, album_artist_pid=0"
-        ))
-        .unwrap();
-    let error = format!("{:#}", fixture.read(false).err().unwrap());
-    assert!(
-        error.contains("catalog track sits in an album without an album artist"),
-        "{error}"
-    );
+fn only_albums_under_no_album_artist_and_alike_share_a_sync_id() {
+    for sql in [
+        // Under an album artist, a shared sync_id stays ambiguous.
+        "UPDATE album SET sync_id=-31 WHERE album_pid=32",
+        "UPDATE album SET sync_id=-34, album_artist_pid=21 WHERE album_pid=33",
+        // Rows under no album artist that differ are two albums.
+        "UPDATE album SET album='Other' WHERE album_pid=35",
+        "UPDATE album SET sort_album='' WHERE album_pid=35",
+        "UPDATE album SET all_compilations=1 WHERE album_pid=35",
+        // A track under no album artist in an album under one, and the reverse.
+        "UPDATE item SET album_artist_pid=0 WHERE item_pid=1",
+        "UPDATE item SET album_artist_pid=21 WHERE item_pid=2",
+    ] {
+        let fixture = Fixture::new(false);
+        fixture.connection.execute_batch(ARTISTLESS).unwrap();
+        fixture.connection.execute_batch(sql).unwrap();
+        assert!(fixture.read(false).is_err(), "{sql}");
+    }
 }
 
 #[test]
@@ -902,7 +1008,7 @@ fn an_entry_the_phone_added_outside_the_library_is_left_out() {
     let album = &catalog.unsynced_albums()[&33];
     assert_eq!(
         (album.sync_id, album.name.as_str(), album.artist_sync_id),
-        (0, "Streamed Album", 0)
+        (0, "Streamed Album", Some(0))
     );
     let artist = &catalog.unsynced_artists()[&23];
     assert_eq!(

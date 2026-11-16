@@ -676,7 +676,7 @@ fn check_inserted(
     ensure!(
         track.sync_id == expected.track_id
             && track.album_sync_id == expected.album_id
-            && track.artist_sync_id == expected.artist_id,
+            && track.artist_sync_id == Some(expected.artist_id),
         "inserted track/group identities differ from the plan"
     );
     ensure!(
@@ -1357,7 +1357,7 @@ fn verify_batch(
         if locationless.contains(&target.track_id) {
             ensure!(
                 track.album_sync_id == target.album_id
-                    && track.artist_sync_id == target.artist_id
+                    && track.artist_sync_id == Some(target.artist_id)
                     && track.afc_path.is_none(),
                 "locationless track {:016x} differs from its planned row",
                 target.track_id

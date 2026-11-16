@@ -915,7 +915,7 @@ fn preflight_refuses_unavailable_missing_unsafe_or_oversized_tracks() {
         sync_id: 1,
         internal_id: 1,
         album_sync_id: 2,
-        artist_sync_id: 3,
+        artist_sync_id: Some(3),
         playback: Default::default(),
         metadata: TrackMetadata {
             content_rating: 0,

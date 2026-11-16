@@ -153,7 +153,7 @@ impl Catalog {
     /// Albums no sync made (`sync_id` 0), by internal id: the phone files the
     /// entries it adds outside the library under them. No operation can name
     /// one, so `albums` leaves them out. They count no members; `artist_sync_id`
-    /// is 0 when the album artist has no sync identity either.
+    /// is `Some(0)` when the album artist has no sync identity either.
     pub fn unsynced_albums(&self) -> &BTreeMap<i64, Album> {
         &self.unsynced_albums
     }
@@ -413,7 +413,9 @@ pub struct Track {
     pub sync_id: u64,
     pub internal_id: i64,
     pub album_sync_id: u64,
-    pub artist_sync_id: u64,
+    /// The album artist group, None for a track the phone filed under none
+    /// (one sent with an empty artist).
+    pub artist_sync_id: Option<u64>,
     pub metadata: TrackMetadata,
     pub afc_path: Option<String>,
     pub availability: Availability,
@@ -496,8 +498,11 @@ pub struct Album {
     pub name: String,
     /// Exact nullable `sort_album`.
     pub sort_name: Option<String>,
+    /// `album_artist_pid`: 0 when the album sits under no album artist.
     pub artist_internal_id: i64,
-    pub artist_sync_id: u64,
+    /// None when the album sits under no album artist: the phone makes no
+    /// album_artist row for a track sent with an empty artist.
+    pub artist_sync_id: Option<u64>,
     pub live_track_count: usize,
     pub all_compilations: bool,
     /// Derived from live item rows, independently of the album summary flag.
@@ -1768,10 +1773,11 @@ fn parse_catalog(
     let mut albums = BTreeMap::new();
     let mut unsynced_albums = BTreeMap::new();
     let mut album_sync_ids = BTreeSet::new();
-    let mut artistless_albums = BTreeSet::new();
+    // Album rows read as the album that came first with their sync_id.
+    let mut album_aliases = BTreeMap::new();
     check_control(control)?;
     let mut statement = connection.prepare(
-        "SELECT album_pid,sync_id,album,sort_album,album_artist_pid,all_compilations FROM album",
+        "SELECT album_pid,sync_id,album,sort_album,album_artist_pid,all_compilations FROM album ORDER BY album_pid",
     )?;
     check_control(control)?;
     let mut rows = statement.query([])?;
@@ -1780,29 +1786,46 @@ fn parse_catalog(
         let internal_id = integer(row, "album_pid")?;
         let sync_id = integer(row, "sync_id")? as u64;
         let artist_internal_id = integer(row, "album_artist_pid")?;
-        // A track sent with an empty artist gets an album with no album artist
-        // (`album_artist_pid` 0), and two such albums may share one sync_id
-        // (observed 2026-11-16). The phone keeps the album after the track is
-        // gone. rustunes sends no such track, so the album is left out; a
-        // track still in one refuses below.
-        if artist_internal_id == 0 {
-            artistless_albums.insert(internal_id);
+        // A track sent with an empty artist gets an album under no album
+        // artist (`album_artist_pid` 0). Without an album either, the phone
+        // makes one such row per track, all with the album's one sync_id
+        // (observed 2026-11-16); they read as one album.
+        let artist_sync_id = if artist_internal_id == 0 {
+            None
+        } else {
+            // An album with a sync identity must be under an artist with one.
+            Some(
+                artists
+                    .get(&artist_internal_id)
+                    .or_else(|| {
+                        (sync_id == 0)
+                            .then(|| unsynced_artists.get(&artist_internal_id))
+                            .flatten()
+                    })
+                    .context("album artist join absent")?
+                    .sync_id,
+            )
+        };
+        let name = text.required(row, "album")?;
+        let sort_name = text.optional(row, "sort_album")?;
+        let all_compilations = flag(row, "all_compilations")?;
+        ensure!(internal_id != 0, "ambiguous catalog album identity");
+        if sync_id != 0 && !album_sync_ids.insert(sync_id) {
+            let first = albums
+                .values()
+                .find(|album: &&Album| album.sync_id == sync_id)
+                .context("ambiguous catalog album identity")?;
+            ensure!(
+                artist_sync_id.is_none()
+                    && first.artist_sync_id.is_none()
+                    && first.name == name
+                    && first.sort_name == sort_name
+                    && first.all_compilations == all_compilations,
+                "ambiguous catalog album identity"
+            );
+            album_aliases.insert(internal_id, first.internal_id);
             continue;
         }
-        // An album with a sync identity must be under an artist with one.
-        let artist_sync_id = artists
-            .get(&artist_internal_id)
-            .or_else(|| {
-                (sync_id == 0)
-                    .then(|| unsynced_artists.get(&artist_internal_id))
-                    .flatten()
-            })
-            .context("album artist join absent")?
-            .sync_id;
-        ensure!(
-            internal_id != 0 && (sync_id == 0 || album_sync_ids.insert(sync_id)),
-            "ambiguous catalog album identity"
-        );
         if sync_id == 0 {
             &mut unsynced_albums
         } else {
@@ -1813,12 +1836,12 @@ fn parse_catalog(
             Album {
                 internal_id,
                 sync_id,
-                name: text.required(row, "album")?,
-                sort_name: text.optional(row, "sort_album")?,
+                name,
+                sort_name,
                 artist_internal_id,
                 artist_sync_id,
                 live_track_count: 0,
-                all_compilations: flag(row, "all_compilations")?,
+                all_compilations,
                 has_compilation_tracks: false,
             },
         );
@@ -1945,35 +1968,45 @@ fn parse_catalog(
         ensure!(seen.insert(sync_id), "duplicate track sync identity");
         title_sorts.insert(sync_id, text.optional(row, "sort_title")?);
         comments.insert(sync_id, text.optional(row, "comment")?);
-        track_item_artists.insert(sync_id, integer(row, "item_artist_pid")?);
+        let item_artist_internal_id = integer(row, "item_artist_pid")?;
+        track_item_artists.insert(sync_id, item_artist_internal_id);
         ensure!(
             integer(row, "media_type")? == 8 && integer(row, "remote_location_id")? == 0,
             "unsupported nonlocal or nonmusic catalog item"
         );
         let internal_id = integer(row, "item_pid")?;
-        ensure!(
-            internal_id != 0 && integer(row, "item_artist_pid")? != 0,
-            "required track join identity is zero"
-        );
+        ensure!(internal_id != 0, "required track join identity is zero");
         let album_internal_id = integer(row, "album_pid")?;
-        ensure!(
-            !artistless_albums.contains(&album_internal_id),
-            "catalog track sits in an album without an album artist"
-        );
         let album = albums
-            .get_mut(&album_internal_id)
+            .get_mut(
+                album_aliases
+                    .get(&album_internal_id)
+                    .unwrap_or(&album_internal_id),
+            )
             .context("track album join absent")?;
-        let artist = artists
-            .get_mut(&integer(row, "album_artist_pid")?)
-            .context("track artist join absent")?;
+        let artist_internal_id = integer(row, "album_artist_pid")?;
         ensure!(
-            album.artist_internal_id == artist.internal_id,
+            album.artist_internal_id == artist_internal_id,
             "track and album artist joins conflict"
         );
+        // A track sent with an empty artist has neither an album artist nor
+        // an item artist row.
+        let artist = if artist_internal_id == 0 {
+            None
+        } else {
+            Some(
+                artists
+                    .get_mut(&artist_internal_id)
+                    .context("track artist join absent")?,
+            )
+        };
         album.live_track_count += 1;
         let is_compilation = flag(row, "is_compilation")?;
         album.has_compilation_tracks |= is_compilation;
-        artist.live_track_count += 1;
+        let album_artist = artist.map(|artist| {
+            artist.live_track_count += 1;
+            (artist.sync_id, artist.name.clone())
+        });
         let genre = text.optional(row, "genre")?;
         let composer = text.optional(row, "composer")?;
         ensure!(
@@ -2036,12 +2069,17 @@ fn parse_catalog(
             sync_id,
             internal_id,
             album_sync_id: album.sync_id,
-            artist_sync_id: artist.sync_id,
+            artist_sync_id: album_artist.as_ref().map(|(id, _)| *id),
             metadata: TrackMetadata {
                 title: text.required(row, "title")?,
-                artist: text.required(row, "artist")?,
+                artist: if item_artist_internal_id == 0 {
+                    String::new()
+                } else {
+                    text.required(row, "artist")?
+                },
                 album: text.cloned(&album.name)?,
-                album_artist: text.cloned(&artist.name)?,
+                album_artist: text
+                    .cloned(album_artist.as_ref().map_or("", |(_, name)| name.as_str()))?,
                 genre,
                 composer,
                 copyright: text.optional(row, "copyright")?,

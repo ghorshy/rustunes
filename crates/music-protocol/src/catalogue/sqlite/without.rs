@@ -89,12 +89,14 @@ impl Catalog {
         for (id, artist) in &self.artists {
             let members = tracks
                 .iter()
-                .filter(|t| t.artist_sync_id == artist.sync_id)
+                .filter(|t| t.artist_sync_id == Some(artist.sync_id))
                 .count();
             let gone = self
                 .tracks
                 .iter()
-                .filter(|t| t.artist_sync_id == artist.sync_id && removed.contains(&t.sync_id))
+                .filter(|t| {
+                    t.artist_sync_id == Some(artist.sync_id) && removed.contains(&t.sync_id)
+                })
                 .count();
             ensure!(
                 members + gone == artist.live_track_count,

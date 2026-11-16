@@ -479,7 +479,7 @@ mod tests {
             sync_id: id,
             internal_id: 1,
             album_sync_id: 21,
-            artist_sync_id: 31,
+            artist_sync_id: Some(31),
             playback: Default::default(),
             metadata: TrackMetadata {
                 content_rating: 0,

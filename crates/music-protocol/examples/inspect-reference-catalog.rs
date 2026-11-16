@@ -61,7 +61,9 @@ fn main() -> Result<()> {
                 d.insert("sync_id".into(), id(t.sync_id));
                 d.insert("internal_id".into(), Value::Integer(t.internal_id.into()));
                 d.insert("album_sync_id".into(), id(t.album_sync_id));
-                d.insert("artist_sync_id".into(), id(t.artist_sync_id));
+                if let Some(artist) = t.artist_sync_id {
+                    d.insert("artist_sync_id".into(), id(artist));
+                }
                 let m = &t.metadata;
                 for (key, value) in [
                     ("title", &m.title),
@@ -133,7 +135,9 @@ fn main() -> Result<()> {
                             "artist_internal_id".into(),
                             Value::Integer(a.artist_internal_id.into()),
                         );
-                        d.insert("artist_sync_id".into(), id(a.artist_sync_id));
+                        if let Some(artist) = a.artist_sync_id {
+                            d.insert("artist_sync_id".into(), id(artist));
+                        }
                         d.insert(
                             "live_track_count".into(),
                             Value::Integer((a.live_track_count as u64).into()),

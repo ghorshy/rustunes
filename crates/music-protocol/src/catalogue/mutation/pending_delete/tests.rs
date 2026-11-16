@@ -76,7 +76,7 @@ fn pending_delete_exact_expected_row_rejects_identity_metadata_and_playback_subs
             0 => expected.sync_id = 0,
             1 => expected.internal_id += 1,
             2 => expected.album_sync_id ^= 1,
-            3 => expected.artist_sync_id ^= 1,
+            3 => expected.artist_sync_id = expected.artist_sync_id.map(|id| id ^ 1),
             4 => expected.metadata.title.push('x'),
             5 => expected.metadata.album_artist.push('x'),
             6 => expected.metadata.file_size = 148305,

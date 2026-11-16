@@ -162,7 +162,7 @@ mod tests {
             match variant {
                 0 => wrong[0].metadata.artist.push('!'),
                 1 => wrong[0].album_sync_id += 1,
-                2 => wrong[0].artist_sync_id += 1,
+                2 => wrong[0].artist_sync_id = wrong[0].artist_sync_id.map(|id| id + 1),
                 3 => wrong[0].playback.play_count_user += 1,
                 4 => wrong[0].metadata.file_size += 1,
                 5 => wrong[0].afc_path = Some("other".into()),
