@@ -1768,6 +1768,7 @@ fn parse_catalog(
     let mut albums = BTreeMap::new();
     let mut unsynced_albums = BTreeMap::new();
     let mut album_sync_ids = BTreeSet::new();
+    let mut artistless_albums = BTreeSet::new();
     check_control(control)?;
     let mut statement = connection.prepare(
         "SELECT album_pid,sync_id,album,sort_album,album_artist_pid,all_compilations FROM album",
@@ -1779,6 +1780,15 @@ fn parse_catalog(
         let internal_id = integer(row, "album_pid")?;
         let sync_id = integer(row, "sync_id")? as u64;
         let artist_internal_id = integer(row, "album_artist_pid")?;
+        // A track sent with an empty artist gets an album with no album artist
+        // (`album_artist_pid` 0), and two such albums may share one sync_id
+        // (observed 2026-11-16). The phone keeps the album after the track is
+        // gone. rustunes sends no such track, so the album is left out; a
+        // track still in one refuses below.
+        if artist_internal_id == 0 {
+            artistless_albums.insert(internal_id);
+            continue;
+        }
         // An album with a sync identity must be under an artist with one.
         let artist_sync_id = artists
             .get(&artist_internal_id)
@@ -1945,8 +1955,13 @@ fn parse_catalog(
             internal_id != 0 && integer(row, "item_artist_pid")? != 0,
             "required track join identity is zero"
         );
+        let album_internal_id = integer(row, "album_pid")?;
+        ensure!(
+            !artistless_albums.contains(&album_internal_id),
+            "catalog track sits in an album without an album artist"
+        );
         let album = albums
-            .get_mut(&integer(row, "album_pid")?)
+            .get_mut(&album_internal_id)
             .context("track album join absent")?;
         let artist = artists
             .get_mut(&integer(row, "album_artist_pid")?)

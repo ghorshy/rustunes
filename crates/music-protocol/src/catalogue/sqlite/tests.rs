@@ -555,6 +555,42 @@ fn missing_or_conflicting_joins_fail() {
     }
 }
 
+/// The phone's leftovers after tracks sent with an empty artist were deleted:
+/// two albums without an album artist sharing one sync_id (observed
+/// 2026-11-16).
+const ARTISTLESS_ALBUMS: &str = "INSERT INTO album VALUES(33,-33,'',0,0,NULL);
+    INSERT INTO album VALUES(34,-33,'',0,0,NULL);";
+
+#[test]
+fn an_empty_album_without_an_album_artist_is_left_out() {
+    let fixture = Fixture::new(false);
+    let before = fixture.read(false).unwrap();
+    fixture.connection.execute_batch(ARTISTLESS_ALBUMS).unwrap();
+    let catalog = fixture.read(false).unwrap();
+    assert_eq!(catalog.tracks(), before.tracks());
+    assert_eq!(
+        catalog.albums().keys().collect::<Vec<_>>(),
+        before.albums().keys().collect::<Vec<_>>()
+    );
+    assert!(catalog.unsynced_albums().is_empty());
+}
+
+#[test]
+fn a_track_in_an_album_without_an_album_artist_refuses() {
+    let fixture = Fixture::new(false);
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "{ARTISTLESS_ALBUMS} UPDATE item SET album_pid=33, album_artist_pid=0"
+        ))
+        .unwrap();
+    let error = format!("{:#}", fixture.read(false).err().unwrap());
+    assert!(
+        error.contains("catalog track sits in an album without an album artist"),
+        "{error}"
+    );
+}
+
 #[test]
 fn zero_or_duplicate_wire_ids_fail() {
     for sql in [
