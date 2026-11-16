@@ -300,6 +300,15 @@ fn project_tags(tags: &Tags, separator: &str) -> Result<Metadata> {
             "numeric ID3 genres require an explicit label mapping"
         );
     }
+    // A missing artist or album is sent empty, as iTunes sends one ("Unknown
+    // Artist", "Unknown Album"); the phone files the track under no album
+    // artist then. A compilation needs a name to group it.
+    let artist = joined_names(&tags.artist, "artist", separator)?.unwrap_or_default();
+    let album_artist = text(&tags.album_artist, "album artist", false)?;
+    ensure!(
+        tags.compilation != Some(true) || !artist.is_empty() || album_artist.is_some(),
+        "a compilation needs an artist or an album artist"
+    );
     Ok(Metadata {
         comment: crate::media::metadata::comment_text(&tags.catalogue_comments())?
             .map(str::to_owned),
@@ -314,9 +323,9 @@ fn project_tags(tags: &Tags, separator: &str) -> Result<Metadata> {
             "missing title",
         )?
         .to_owned(),
-        artist: joined_names(&tags.artist, "artist", separator)?.context("missing artist")?,
-        album: text(&tags.album, "album", true)?.context("missing album")?,
-        album_artist: text(&tags.album_artist, "album artist", false)?,
+        artist,
+        album: text(&tags.album, "album", false)?.unwrap_or_default(),
+        album_artist,
         genre,
         composer: joined_names(&tags.composer, "composer", separator)?,
         copyright: text(&tags.copyright, "copyright", false)?,
@@ -571,13 +580,11 @@ mod tests {
         assert_eq!(composer(&["", "Artist B", ""]).as_deref(), Some("Artist B"));
         assert_eq!(composer(&[""]), None);
         assert_eq!(composer(&["", ""]), None);
-        // A required field left with no value is missing, and an empty sort
+        // An artist left with no value is sent empty, and an empty sort
         // name says nothing.
         let mut empty = artists(&[""], &[""]);
-        assert_eq!(
-            project_tags(&empty, "; ").unwrap_err().to_string(),
-            "missing artist"
-        );
+        let m = project_tags(&empty, "; ").unwrap();
+        assert_eq!((m.artist.as_str(), m.sort_artist), ("", None));
         empty.artist = vec!["Artist A".into()];
         empty.genre = vec![String::new()];
         empty.copyright = vec![String::new()];
@@ -644,7 +651,27 @@ mod tests {
             refused(&["Artist A"], &["A", "B\t"]),
             "invalid sort artist text"
         );
-        assert_eq!(refused(&[], &[]), "missing artist");
+        assert_eq!(project_tags(&artists(&[], &[]), "; ").unwrap().artist, "");
+    }
+
+    /// A missing artist or album is sent empty, as iTunes sends one; a
+    /// compilation still needs an artist or an album artist to group it.
+    #[test]
+    fn a_missing_artist_or_album_is_sent_empty_but_a_compilation_needs_a_name() {
+        let mut bare = artists(&[], &[]);
+        bare.album.clear();
+        let m = project_tags(&bare, "; ").unwrap();
+        assert_eq!((m.artist.as_str(), m.album.as_str()), ("", ""));
+        bare.compilation = Some(true);
+        assert_eq!(
+            project_tags(&bare, "; ").unwrap_err().to_string(),
+            "a compilation needs an artist or an album artist"
+        );
+        bare.album_artist = vec!["Various Artists".into()];
+        assert!(project_tags(&bare, "; ").is_ok());
+        let mut named = artists(&["Artist A"], &[]);
+        named.compilation = Some(true);
+        assert!(project_tags(&named, "; ").is_ok());
     }
 
     #[test]

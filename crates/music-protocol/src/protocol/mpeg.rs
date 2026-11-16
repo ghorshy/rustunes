@@ -179,16 +179,20 @@ pub fn serialize_format(
             && ids.album != ids.artist,
         "MPEG proposed identities are invalid"
     );
-    for text in [
-        fields.title,
-        fields.sort_title,
-        fields.artist,
-        fields.sort_artist,
-        fields.album,
-        fields.sort_album,
+    // A source without an artist or album sends them empty, as iTunes does;
+    // the title never is.
+    for (text, may_be_empty) in [
+        (fields.title, false),
+        (fields.sort_title, false),
+        (fields.artist, true),
+        (fields.sort_artist, true),
+        (fields.album, true),
+        (fields.sort_album, true),
     ] {
         ensure!(
-            !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control),
+            (may_be_empty || !text.is_empty())
+                && text.len() <= 4096
+                && !text.chars().any(char::is_control),
             "invalid MPEG wire text"
         );
     }

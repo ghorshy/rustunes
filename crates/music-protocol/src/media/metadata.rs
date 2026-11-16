@@ -687,8 +687,9 @@ impl Metadata {
                 self.file_title.as_deref(),
                 "missing standard title",
             )?,
-            artist: names(&self.artist, "artist", separator)?.context("missing standard artist")?,
-            album: first(&self.album, "album")?.context("missing standard album")?,
+            // A missing artist or album is sent empty, as iTunes sends one.
+            artist: names(&self.artist, "artist", separator)?.unwrap_or(""),
+            album: first(&self.album, "album")?.unwrap_or(""),
             album_artist: first(&self.album_artist, "album artist")?,
             genre: first(&self.genre, "genre")?,
             composer: names(&self.composer, "composer", separator)?,
@@ -1256,23 +1257,30 @@ mod tests {
         .unwrap();
         assert_eq!(kept.composer, [""]);
         assert!(kept.to_string().contains("Composer: \"\"\n"));
-        // A required field left with no value is missing, as a removed one is.
-        for (atom, field) in [
-            (*b"\xa9nam", "title"),
-            (*b"\xa9ART", "artist"),
-            (*b"\xa9alb", "album"),
-        ] {
-            let missing = format!("missing standard {field}");
+        // A field left with no value is as a removed one: a title is
+        // missing (these bytes have no file name), an artist or album is
+        // sent empty.
+        for atom in [*b"\xa9nam", *b"\xa9ART", *b"\xa9alb"] {
             let removed = retagged(|tag| {
                 let _ = tag.remove(&AtomIdent::Fourcc(atom));
             })
             .unwrap();
-            assert_eq!(removed.projected().unwrap_err().to_string(), missing);
+            let projected = |m: &Metadata| {
+                m.projected()
+                    .map(|s| (s.artist.to_owned(), s.album.to_owned()))
+                    .map_err(|e| e.to_string())
+            };
+            let expected = match &atom {
+                b"\xa9nam" => Err("missing standard title".to_owned()),
+                b"\xa9ART" => Ok((String::new(), "Example album".to_owned())),
+                _ => Ok((projected(&removed).unwrap().0, String::new())),
+            };
+            assert_eq!(projected(&removed), expected);
             for empty in empty_values() {
                 let emptied =
                     retagged(|tag| tag.replace_atom(Atom::new(AtomIdent::Fourcc(atom), empty)))
                         .unwrap();
-                assert_eq!(emptied.projected().unwrap_err().to_string(), missing);
+                assert_eq!(projected(&emptied), expected);
             }
         }
         // A compilation whose album artist is emptied is refused as one

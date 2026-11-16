@@ -471,8 +471,8 @@ fn check_tags(source: &metadata::Metadata, report: &mut Report) {
     }
     for (name, values, required) in [
         ("title", &source.title, true),
-        ("artist", &source.artist, true),
-        ("album", &source.album, true),
+        ("artist", &source.artist, false),
+        ("album", &source.album, false),
         ("album_artist", &source.album_artist, false),
         ("genre", &source.genre, false),
         ("composer", &source.composer, false),
@@ -674,14 +674,24 @@ mod tests {
     #[test]
     fn reads_aac_as_another_format_and_does_not_run_decoder_for_invalid_input() {
         // An AAC M4A goes by the other formats' reader. This one has no
-        // title, artist or album tag; its file name gives the title.
+        // title, artist or album tag: its file name gives the title, and the
+        // artist and album go empty.
         let report = inspect(&fixture("silence-aac.m4a"), false);
         assert_eq!(report.profile, "other-format-insert-batch-source");
         assert!(report.mp3.is_some() && report.audio.is_none());
-        assert!(!report.supported_by_current_profile);
-        assert!(report.issues.iter().any(|i| {
-            i.code == "mp3_source_profile_unsupported" && i.message.contains("missing artist")
-        }));
+        assert!(report.supported_by_current_profile);
+        let projected = music_protocol::media::mpeg::projection::project(
+            &music_protocol::media::mpeg::read(&fixture("silence-aac.m4a")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                projected.title.as_str(),
+                projected.artist.as_str(),
+                projected.album.as_str()
+            ),
+            ("silence-aac", "", "")
+        );
         let missing = inspect(&fixture("missing.m4a"), true);
         assert!(!missing.supported_by_current_profile);
         assert!(missing.decode == Decode::SkippedInvalidInput);
@@ -692,7 +702,7 @@ mod tests {
     fn reports_all_mapping_conflicts_without_discarding_repeated_values() {
         let mut tags = metadata::read(&fixture("silence-alac.m4a")).unwrap();
         tags.artist = vec!["One, Two".into(), "One".into(), "Two".into()];
-        tags.album.clear();
+        tags.title.clear();
         tags.track = Some(11);
         tags.track_total = Some(10);
         // Any rate or depth the phone takes passes; six channels do not.

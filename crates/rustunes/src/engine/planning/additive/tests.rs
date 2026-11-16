@@ -1528,11 +1528,8 @@ fn mp3_exact_match_is_unowned_keep_and_new_or_changed_bytes_never_allocate() {
     );
     // Tag-only drift has real equal source frame bytes, but this device index
     // cannot prove frame identity independently of its now-different full file.
-    fs::write(
-        &path,
-        [b"ID3\x04\0\0\0\0\0\0".as_slice(), bytes.as_slice()].concat(),
-    )
-    .unwrap();
+    // The new tag holds only a numeric genre, which no projection maps.
+    fs::write(&path, [NUMERIC_GENRE_TAG, bytes.as_slice()].concat()).unwrap();
     let changed = inspect(&select(&path, &SelectionOptions::default()).unwrap()).unwrap();
     assert_eq!(
         source.mp3_tracks[0].source.fingerprint.audio,
@@ -1628,6 +1625,11 @@ fn unowned_metadata_drift_reports_raw_sort_rating_compilation_and_refuses_owners
     assert!(matches!(preserved.sources[0].decision, Decision::Keep));
 }
 
+/// An ID3v2.4 tag of one numeric genre, `(17)`: a tag no projection maps,
+/// so an MP3 with it cannot be added. (A tag of nothing can: the file name
+/// gives the title, and the artist and album are sent empty.)
+const NUMERIC_GENRE_TAG: &[u8] = b"ID3\x04\0\0\0\0\0\x0fTCON\0\0\0\x05\0\0\x03(17)";
+
 /// A whole-library replacement checks the sources no plan could add before it
 /// removes anything (seen on the phone: an MP3 no plan could add was left off
 /// the phone after the removal).
@@ -1639,11 +1641,7 @@ fn uninsertable_sources_are_the_source_side_refusals() {
     fs::write(temp.0.join("broken.m4a"), b"not an m4a").unwrap();
     fs::write(
         temp.0.join("tagged.mp3"),
-        [
-            b"ID3\x04\0\0\0\0\0\0".as_slice(),
-            mp3_fixture_bytes().as_slice(),
-        ]
-        .concat(),
+        [NUMERIC_GENRE_TAG, mp3_fixture_bytes().as_slice()].concat(),
     )
     .unwrap();
     let sources = inspect(&select(&temp.0, &SelectionOptions::default()).unwrap()).unwrap();

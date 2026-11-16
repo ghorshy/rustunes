@@ -291,6 +291,20 @@ mod fixtures {
         Fixture::tagged(&[("TPE1", "Artist"), ("TALB", "Album")], audio())
     }
 
+    /// An empty album is no album: it is sent empty.
+    pub(super) fn empty_album_mp3() -> Fixture {
+        Fixture::tagged(
+            &[("TIT2", "Title"), ("TPE1", "Artist"), ("TALB", "")],
+            audio(),
+        )
+    }
+
+    /// No tags at all: the file name gives the title, and the artist and
+    /// album go empty (variant A, 2026-11-16).
+    pub(super) fn untagged_mp3() -> Fixture {
+        Fixture::tagged(&[], audio())
+    }
+
     // Projections the assessment refuses.
     pub(super) fn second_title_mp3() -> Fixture {
         Fixture::tagged(&with(&[("TIT2", "second title")]), audio())
@@ -298,12 +312,6 @@ mod fixtures {
     /// A second, empty artist is no artist: the source projects as the plain one.
     pub(super) fn second_artist_empty_mp3() -> Fixture {
         Fixture::tagged(&with(&[("TPE1", "")]), audio())
-    }
-    pub(super) fn empty_album_mp3() -> Fixture {
-        Fixture::tagged(
-            &[("TIT2", "Title"), ("TPE1", "Artist"), ("TALB", "")],
-            audio(),
-        )
     }
     pub(super) fn bad_release_date_mp3() -> Fixture {
         Fixture::tagged(&with(&[("TDRC", "24-05-01")]), audio())
@@ -464,7 +472,8 @@ pins!(assessment, assessment, {
     title_from_file_name_mp3 => Pin::Hash("c349afd8b461d89e10f6e8aa316f60e98f50de9f09f875df0c56294d9d2711a0"),
     second_title_mp3 => Pin::Hash("4a5616f9d8c94677ec423ef2761092c824e512aeb7bccd7a44518203e967034f"),
     second_artist_empty_mp3 => Pin::Hash("54f678d7bf091bed2030d6eed35e1320659416fe27ef6e7a3c8f70b9c9f41797"),
-    empty_album_mp3 => Pin::Hash("e6c1406155593dad645dc55a175b5694bdf31eaf77b42235add7103b77d47b42"),
+    empty_album_mp3 => Pin::Hash("b0ca4077872596a393bfef5e2f3450bc6a25a2d63298246e8d7166c42c311660"),
+    untagged_mp3 => Pin::Hash("4797614b7071f28a5eb1fd4db79e2b37f65120405de9dd81c536e4d8894c6c46"),
     bad_release_date_mp3 => Pin::Hash("7bc415e07e4cff51df9a1496a2bdb09f7a60a73d67a0896eb6fd2383bf7569b5"),
     zero_release_year_mp3 => Pin::Hash("f5ac590ae96a26983451bf9412617bf576fdf0ed6c5ee9dc06cef33d2d604962"),
     numeric_genre_mp3 => Pin::Hash("89cb2ef65d537f11b35d3bb1034700da7d3afc1165ac553d98e07a5d64b6e832"),
@@ -489,7 +498,8 @@ pins!(issues, issues, {
     title_from_file_name_mp3 => Pin::Json(r#"[{"code":"mp3_gapless_batch_only","detail":"The encoder delay, drain and played duration Apple's sync finds for an MP3 go only in an insert batch"}]"#),
     second_title_mp3 => Pin::Json(r#"[{"code":"mp3_metadata_policy_required","detail":"title has 2 values in the file's tag; edit the tag to keep one"},{"code":"mp3_gapless_batch_only","detail":"The encoder delay, drain and played duration Apple's sync finds for an MP3 go only in an insert batch"}]"#),
     second_artist_empty_mp3 => Pin::Json(r#"[{"code":"mp3_gapless_batch_only","detail":"The encoder delay, drain and played duration Apple's sync finds for an MP3 go only in an insert batch"}]"#),
-    empty_album_mp3 => Pin::Json(r#"[{"code":"mp3_metadata_policy_required","detail":"missing album"},{"code":"mp3_gapless_batch_only","detail":"The encoder delay, drain and played duration Apple's sync finds for an MP3 go only in an insert batch"}]"#),
+    empty_album_mp3 => Pin::Json(r#"[{"code":"mp3_gapless_batch_only","detail":"The encoder delay, drain and played duration Apple's sync finds for an MP3 go only in an insert batch"}]"#),
+    untagged_mp3 => Pin::Json(r#"[{"code":"mp3_gapless_batch_only","detail":"The encoder delay, drain and played duration Apple's sync finds for an MP3 go only in an insert batch"}]"#),
     bad_release_date_mp3 => Pin::Json(r#"[{"code":"mp3_metadata_policy_required","detail":"a release date must start with a four-digit year"},{"code":"mp3_gapless_batch_only","detail":"The encoder delay, drain and played duration Apple's sync finds for an MP3 go only in an insert batch"}]"#),
     zero_release_year_mp3 => Pin::Json(r#"[{"code":"mp3_metadata_policy_required","detail":"zero release year"},{"code":"mp3_gapless_batch_only","detail":"The encoder delay, drain and played duration Apple's sync finds for an MP3 go only in an insert batch"}]"#),
     numeric_genre_mp3 => Pin::Json(r#"[{"code":"mp3_metadata_policy_required","detail":"numeric ID3 genres require an explicit label mapping"},{"code":"mp3_gapless_batch_only","detail":"The encoder delay, drain and played duration Apple's sync finds for an MP3 go only in an insert batch"}]"#),
@@ -529,7 +539,8 @@ pins!(operation, operation, {
     title_from_file_name_mp3 => Pin::Hash("131b174a964fd23e3856d36f70a97e4b694d0dc77109c4c3f468beaa17f6bcb0"),
     second_title_mp3 => Pin::Refused,
     second_artist_empty_mp3 => Pin::Hash("f0e58f51e84c4e4773446169b2a71c1a35b283a4f0c99006530ba2d5dbd046df"),
-    empty_album_mp3 => Pin::Refused,
+    empty_album_mp3 => Pin::Hash("b3eb9c0051645ed96afe71fe478528da0827a875a6baea1371d1685fce71c3e6"),
+    untagged_mp3 => Pin::Hash("f88e9e61057b2d9ec2edfdad1ef30507b16a60580c7ce5a215c1835a9bf2f237"),
     bad_release_date_mp3 => Pin::Refused,
     zero_release_year_mp3 => Pin::Refused,
     numeric_genre_mp3 => Pin::Refused,
@@ -577,7 +588,8 @@ pins!(fields, fields, {
     title_from_file_name_mp3 => Pin::Json(r#"[{"title":"source","artist":"Artist","album":"Album","album_artist":null,"genre":null,"composer":null,"copyright":null,"year":null,"track":null,"track_total":null,"disc":null,"disc_total":null,"compilation":null},{"basis":"apple_counted_frames_and_played_samples","sample_rate":44100,"channels":2,"bit_rate_kbps":128,"coded_samples":1176,"total_time_ms_floor":52,"native_mapping_qualified":false,"gapless":{"delay":528,"drain":600,"heuristic":33554435,"resynch":0}}]"#),
     second_title_mp3 => Pin::Refused,
     second_artist_empty_mp3 => Pin::Hash("04afb48d6678d575eb7498ea56f25f6979425ce8566c04bb476ebc8e315b86f7"),
-    empty_album_mp3 => Pin::Refused,
+    empty_album_mp3 => Pin::Json(r#"[{"title":"Title","artist":"Artist","album":"","album_artist":null,"genre":null,"composer":null,"copyright":null,"year":null,"track":null,"track_total":null,"disc":null,"disc_total":null,"compilation":null},{"basis":"apple_counted_frames_and_played_samples","sample_rate":44100,"channels":2,"bit_rate_kbps":128,"coded_samples":1176,"total_time_ms_floor":52,"native_mapping_qualified":false,"gapless":{"delay":528,"drain":600,"heuristic":33554435,"resynch":0}}]"#),
+    untagged_mp3 => Pin::Json(r#"[{"title":"source","artist":"","album":"","album_artist":null,"genre":null,"composer":null,"copyright":null,"year":null,"track":null,"track_total":null,"disc":null,"disc_total":null,"compilation":null},{"basis":"apple_counted_frames_and_played_samples","sample_rate":44100,"channels":2,"bit_rate_kbps":128,"coded_samples":1176,"total_time_ms_floor":52,"native_mapping_qualified":false,"gapless":{"delay":528,"drain":600,"heuristic":33554435,"resynch":0}}]"#),
     bad_release_date_mp3 => Pin::Refused,
     zero_release_year_mp3 => Pin::Refused,
     numeric_genre_mp3 => Pin::Refused,
@@ -613,7 +625,8 @@ pins!(expected, expected, {
     title_from_file_name_mp3 => Pin::Json(r#"[{"title":"source","artist":"Artist","album":"Album","album_artist":null,"genre":null,"composer":null,"copyright":null,"year":null,"content_rating":null,"compilation":null,"track":null,"track_total":null,"disc":null,"disc_total":null},52]"#),
     second_title_mp3 => Pin::Refused,
     second_artist_empty_mp3 => Pin::Hash("65b79660777d755bbf5127c47260394430104d0a93e95e5702f61b11c303332f"),
-    empty_album_mp3 => Pin::Refused,
+    empty_album_mp3 => Pin::Json(r#"[{"title":"Title","artist":"Artist","album":"","album_artist":null,"genre":null,"composer":null,"copyright":null,"year":null,"content_rating":null,"compilation":null,"track":null,"track_total":null,"disc":null,"disc_total":null},52]"#),
+    untagged_mp3 => Pin::Json(r#"[{"title":"source","artist":"","album":"","album_artist":null,"genre":null,"composer":null,"copyright":null,"year":null,"content_rating":null,"compilation":null,"track":null,"track_total":null,"disc":null,"disc_total":null},52]"#),
     bad_release_date_mp3 => Pin::Refused,
     zero_release_year_mp3 => Pin::Refused,
     numeric_genre_mp3 => Pin::Refused,
@@ -649,7 +662,8 @@ pins!(projected, projected, {
     title_from_file_name_mp3 => Pin::Json(r#"{"title":"source","sort_name":"source","artist":"Artist","album":"Album","album_artist":null,"grouping_artist":"Artist","genre":null,"composer":null,"copyright":null,"year":null,"content_rating":null,"compilation":null,"track":null,"track_total":null,"disc":null,"disc_total":null,"sample_rate":44100,"bit_depth":0,"channels":2,"duration_ticks":1176,"total_time_ms":52}"#),
     second_title_mp3 => Pin::Refused,
     second_artist_empty_mp3 => Pin::Hash("2469aca3efc8a6fa164c2a0312bef50ee51565ce0f6b6aa8a55e12a6111c354a"),
-    empty_album_mp3 => Pin::Refused,
+    empty_album_mp3 => Pin::Json(r#"{"title":"Title","sort_name":"Title","artist":"Artist","album":"","album_artist":null,"grouping_artist":"Artist","genre":null,"composer":null,"copyright":null,"year":null,"content_rating":null,"compilation":null,"track":null,"track_total":null,"disc":null,"disc_total":null,"sample_rate":44100,"bit_depth":0,"channels":2,"duration_ticks":1176,"total_time_ms":52}"#),
+    untagged_mp3 => Pin::Json(r#"{"title":"source","sort_name":"source","artist":"","album":"","album_artist":null,"grouping_artist":"","genre":null,"composer":null,"copyright":null,"year":null,"content_rating":null,"compilation":null,"track":null,"track_total":null,"disc":null,"disc_total":null,"sample_rate":44100,"bit_depth":0,"channels":2,"duration_ticks":1176,"total_time_ms":52}"#),
     bad_release_date_mp3 => Pin::Refused,
     zero_release_year_mp3 => Pin::Refused,
     numeric_genre_mp3 => Pin::Refused,

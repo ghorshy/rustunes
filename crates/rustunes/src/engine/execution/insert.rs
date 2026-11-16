@@ -255,6 +255,50 @@ mod tests {
         assert!(prepare_live(&source, &planned, &missing, SystemTime::UNIX_EPOCH).is_err());
     }
 
+    /// A source without an artist or album sends both, and their sort
+    /// names, empty, as variant A did (2026-11-16); the title is the file
+    /// name's.
+    #[test]
+    fn prepare_live_sends_a_missing_artist_and_album_empty() {
+        let mut source = source();
+        source.title.clear();
+        source.artist.clear();
+        source.album.clear();
+        source.named_after(std::path::Path::new("/music/Untagged One.m4a"));
+        let before = music_protocol::test_support::catalogue::collection_catalog(13);
+        let mut planner =
+            crate::engine::planning::collections::Planner::new(&before, &BTreeSet::new());
+        let planned = planner
+            .plan(
+                &source,
+                crate::engine::planning::collections::CandidateIds {
+                    track: 2000,
+                    album: Some(3000),
+                    artist: Some(4000),
+                },
+            )
+            .unwrap();
+        let new = prepare_live(&source, &planned, &before, SystemTime::UNIX_EPOCH).unwrap();
+        let new: Value = plist::from_bytes(&new).unwrap();
+        let item = new.as_dictionary().unwrap()["operations"]
+            .as_array()
+            .unwrap()[1]
+            .as_dictionary()
+            .unwrap()["item"]
+            .as_dictionary()
+            .unwrap();
+        for (field, value) in [
+            ("title", "Untagged One"),
+            ("sort_name", "Untagged One"),
+            ("artist", ""),
+            ("sort_artist", ""),
+            ("album", ""),
+            ("sort_album", ""),
+        ] {
+            assert_eq!(item[field].as_string(), Some(value), "{field}");
+        }
+    }
+
     #[test]
     fn prepare_live_sends_sort_names_without_a_leading_article_and_the_comment() {
         let mut source = source();
