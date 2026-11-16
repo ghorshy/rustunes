@@ -243,7 +243,10 @@ impl ArtworkFacts {
 /// `mpeg::read` (MP3, AAC, FLAC, WAV), unless this file was read unchanged
 /// before.
 pub(crate) fn mpeg(path: &Path) -> Result<mpeg::Source> {
-    kept(&MPEG, path, mpeg::read)
+    let mut source = kept(&MPEG, path, mpeg::read)?;
+    // A read kept by an earlier version has no file title.
+    source.metadata.named_after(path);
+    Ok(source)
 }
 
 /// [`fingerprint`], refused when it differs from what planning recorded. An

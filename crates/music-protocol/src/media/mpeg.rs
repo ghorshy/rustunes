@@ -87,8 +87,22 @@ pub struct Tags {
     /// What Apple's sync reads from an ID3v2 tag for an MP3's gapless fields.
     #[serde(default, skip_serializing_if = "gapless::EncoderHints::is_empty")]
     pub encoder_hints: gapless::EncoderHints,
+    /// The file name without its last extension, when the file has no title
+    /// tag: the projection sends it as the title
+    /// ([`crate::media::metadata::file_title`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_title: Option<String>,
 }
 impl Tags {
+    /// Take `path`'s file name as [`Self::file_title`] when the file has no
+    /// title tag.
+    pub fn named_after(&mut self, path: &Path) {
+        self.file_title = crate::media::metadata::tag_values(&self.title)
+            .next()
+            .is_none()
+            .then(|| crate::media::metadata::file_title(path))
+            .flatten();
+    }
     /// The distinct texts a catalogue comment can come from: comments
     /// without a description. Apple's sync takes an ID3 comment only from a
     /// COMM frame with an empty description, in any language; a described
@@ -265,11 +279,12 @@ pub fn read(path: &Path) -> Result<Source> {
         same(&before, &file.metadata()?),
         "MP3 source changed before open"
     );
-    let result = read_file(&mut file, before.len())?;
+    let mut result = read_file(&mut file, before.len())?;
     ensure!(
         same(&before, &file.metadata()?) && same(&before, &fs::symlink_metadata(path)?),
         "MP3 source changed during inspection"
     );
+    result.metadata.named_after(path);
     Ok(result)
 }
 use crate::media::held_source::same_file as same;
@@ -838,16 +853,19 @@ pub fn read_front_cover(path: &Path, expected: &Source) -> Result<Option<Embedde
         .context("MP3 tag span differs")?;
     let chosen = cover_index(&expected.artwork);
     let (mut front, mut at) = (None, 0);
-    let (tags, version, frames, pictures) = parse_id3_with_picture(tag, &mut |facts, image| {
-        if Some(at) == chosen {
-            front = Some(EmbeddedCover {
-                bytes: image.to_vec(),
-                facts: facts.clone(),
-            });
-        }
-        at += 1;
-        Ok(())
-    })?;
+    let (mut tags, version, frames, pictures) =
+        parse_id3_with_picture(tag, &mut |facts, image| {
+            if Some(at) == chosen {
+                front = Some(EmbeddedCover {
+                    bytes: image.to_vec(),
+                    facts: facts.clone(),
+                });
+            }
+            at += 1;
+            Ok(())
+        })?;
+    // The bytes hold no file name.
+    tags.file_title.clone_from(&expected.metadata.file_title);
     ensure!(
         tags == expected.metadata
             && version == expected.id3_version

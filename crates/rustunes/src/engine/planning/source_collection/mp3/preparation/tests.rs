@@ -191,10 +191,10 @@ fn an_mp3_with_two_composers_is_added_with_them_joined() {
 }
 
 #[test]
-fn missing_title_and_unknown_frame_are_actionable_blockers() {
+fn a_missing_title_takes_the_file_name_and_an_unknown_frame_is_an_actionable_blocker() {
     let temp = Temp::new();
     let (_, source) = temp.source(&[("TPE1", "Artist"), ("TALB", "Album")], audio());
-    assert!(assess(&source).metadata.is_none());
+    assert_eq!(assess(&source).metadata.unwrap().title, "source");
     let mut values = tags();
     values.push(("TIT3", "a subtitle"));
     let (path, source) = temp.source(&values, audio());

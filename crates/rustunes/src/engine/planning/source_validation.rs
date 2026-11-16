@@ -481,7 +481,9 @@ fn check_tags(source: &metadata::Metadata, report: &mut Report) {
         // An empty value is no value (`metadata::tag_value`): a field left
         // with none is absent.
         let values: Vec<_> = metadata::tag_values(values).collect();
-        if required && values.is_empty() {
+        // A source without a title tag takes its file name.
+        let named = name == "title" && source.file_title.is_some();
+        if required && values.is_empty() && !named {
             report.issue(
                 Severity::Error,
                 "required_tag_absent",
@@ -671,13 +673,14 @@ mod tests {
 
     #[test]
     fn reads_aac_as_another_format_and_does_not_run_decoder_for_invalid_input() {
-        // An AAC M4A goes by the other formats' reader; this one has no title.
+        // An AAC M4A goes by the other formats' reader. This one has no
+        // title, artist or album tag; its file name gives the title.
         let report = inspect(&fixture("silence-aac.m4a"), false);
         assert_eq!(report.profile, "other-format-insert-batch-source");
         assert!(report.mp3.is_some() && report.audio.is_none());
         assert!(!report.supported_by_current_profile);
         assert!(report.issues.iter().any(|i| {
-            i.code == "mp3_source_profile_unsupported" && i.message.contains("missing title")
+            i.code == "mp3_source_profile_unsupported" && i.message.contains("missing artist")
         }));
         let missing = inspect(&fixture("missing.m4a"), true);
         assert!(!missing.supported_by_current_profile);

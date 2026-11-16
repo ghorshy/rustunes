@@ -60,6 +60,36 @@ pub struct Metadata {
     pub sample_rate: u32,
     pub bit_depth: u8,
     pub channels: u8,
+    /// The file name without its last extension, when the file has no title
+    /// tag: the projection sends it as the title (see [`file_title`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_title: Option<String>,
+}
+
+/// The title a source without a title tag takes, as iTunes gives one: its
+/// file name without the last extension, exactly as it is (`DUDE..wav` is
+/// `DUDE.`). None when the name is not UTF-8.
+pub fn file_title(path: &Path) -> Option<String> {
+    path.file_stem()?.to_str().map(str::to_owned)
+}
+
+/// The title a projection sends for `tags`: the one title tag, or else the
+/// file name, under the same text rules plus not blank.
+pub(crate) fn title_or_file_title<'a>(
+    tag: Option<&'a str>,
+    file_title: Option<&'a str>,
+    missing: &str,
+) -> Result<&'a str> {
+    if let Some(title) = tag {
+        return Ok(title);
+    }
+    let title = file_title.context(missing.to_owned())?;
+    check_text(title, "title from the file name")?;
+    ensure!(
+        !title.trim().is_empty(),
+        "invalid title from the file name text"
+    );
+    Ok(title)
 }
 
 pub fn read(path: &Path) -> Result<Metadata> {
@@ -90,7 +120,21 @@ pub fn read(path: &Path) -> Result<Metadata> {
     let mut metadata = from_mp4(&mp4, timing)?;
     metadata.standard_atom_counts = layout.counts;
     metadata.compilation = layout.compilation;
+    metadata.named_after(path);
     Ok(metadata)
+}
+
+impl Metadata {
+    /// Take `path`'s [`file_title`] when the file has no title tag. A copy
+    /// read under another name (a spool, a conversion) takes its library
+    /// file's name with this.
+    pub fn named_after(&mut self, path: &Path) {
+        self.file_title = tag_values(&self.title)
+            .next()
+            .is_none()
+            .then(|| file_title(path))
+            .flatten();
+    }
 }
 
 /// The standard `ilst` tags of any unprotected MP4 audio file (AAC as well as
@@ -140,6 +184,7 @@ pub fn mp4_tags(
         sort_album_artist: standard_text(tag, *b"soaa")?,
         sort_composer: standard_names(tag, *b"soco")?,
         encoder_hints: Default::default(),
+        file_title: None,
     };
     let fields = layout
         .counts
@@ -298,6 +343,7 @@ fn from_mp4(mp4: &Mp4File, timing: crate::media::timing::Timing) -> Result<Metad
         sample_rate,
         bit_depth,
         channels,
+        file_title: None,
     })
 }
 
@@ -636,7 +682,11 @@ impl Metadata {
             Ok(joined_names(values, &format!("standard {name}"), separator)?.map(interned))
         }
         Ok(ScalarMetadata {
-            title: first(&self.title, "title")?.context("missing standard title")?,
+            title: title_or_file_title(
+                first(&self.title, "title")?,
+                self.file_title.as_deref(),
+                "missing standard title",
+            )?,
             artist: names(&self.artist, "artist", separator)?.context("missing standard artist")?,
             album: first(&self.album, "album")?.context("missing standard album")?,
             album_artist: first(&self.album_artist, "album artist")?,
@@ -936,6 +986,54 @@ mod tests {
     // Append a separate outer atom, since Lofty's public insert API merges
     // matching atoms and would conceal this reader regression.
     use crate::test_support::mp4::append_outer;
+
+    /// A source without a title tag takes its file name without the last
+    /// extension, exactly as it is; a title tag always wins.
+    #[test]
+    fn a_source_without_a_title_tag_takes_its_file_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let tagged = parsed(ALAC.to_vec()).unwrap();
+        let mut untitled = tagged.clone();
+        untitled.title.clear();
+        let named = |path: &[u8]| {
+            let mut source = untitled.clone();
+            source.named_after(Path::new(std::ffi::OsStr::from_bytes(path)));
+            source
+        };
+        for (path, title) in [
+            (b"/music/DUDE..m4a".as_slice(), "DUDE."),
+            (b"/music/01 - Track_one.m4a", "01 - Track_one"),
+            (b"/music/no extension", "no extension"),
+        ] {
+            let source = named(path);
+            assert_eq!(source.file_title.as_deref(), Some(title));
+            assert_eq!(source.projected().unwrap().title, title);
+        }
+        // An empty title tag is no title.
+        let mut emptied = untitled.clone();
+        emptied.title = vec![String::new()];
+        emptied.named_after(Path::new("/music/Named.m4a"));
+        assert_eq!(emptied.projected().unwrap().title, "Named");
+        // A name that is not UTF-8 gives none; one with a control character
+        // or only spaces refuses.
+        let error = named(b"/music/\xff.m4a").projected().unwrap_err();
+        assert_eq!(error.to_string(), "missing standard title");
+        for path in [b"/music/a\tb.m4a".as_slice(), b"/music/  .m4a"] {
+            let error = named(path).projected().unwrap_err().to_string();
+            assert!(error.contains("title from the file name"), "{error}");
+        }
+        // A title tag wins, and the name is then not kept at all.
+        let mut titled = tagged.clone();
+        titled.named_after(Path::new("/music/Other.m4a"));
+        assert_eq!(titled.file_title, None);
+        assert_eq!(titled, tagged);
+        assert!(
+            serde_json::to_value(&titled)
+                .unwrap()
+                .get("file_title")
+                .is_none()
+        );
+    }
 
     /// `01 - Reckless.m4a`: `desc` and `cprt` typed UTF-8 but holding
     /// `17 A9 20 …` (a Latin-1 `©`). An atom no projection reads does not

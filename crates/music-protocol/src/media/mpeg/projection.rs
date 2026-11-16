@@ -308,7 +308,12 @@ fn project_tags(tags: &Tags, separator: &str) -> Result<Metadata> {
         sort_album: text(&tags.sort_album, "sort album", false)?,
         sort_album_artist: text(&tags.sort_album_artist, "sort album artist", false)?,
         sort_composer: joined_names(&tags.sort_composer, "sort composer", separator)?,
-        title: text(&tags.title, "title", true)?.context("missing title")?,
+        title: crate::media::metadata::title_or_file_title(
+            text(&tags.title, "title", false)?.as_deref(),
+            tags.file_title.as_deref(),
+            "missing title",
+        )?
+        .to_owned(),
         artist: joined_names(&tags.artist, "artist", separator)?.context("missing artist")?,
         album: text(&tags.album, "album", true)?.context("missing album")?,
         album_artist: text(&tags.album_artist, "album artist", false)?,

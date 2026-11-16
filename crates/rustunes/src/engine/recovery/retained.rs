@@ -334,7 +334,13 @@ where
         let mut managed_preservation_required = false;
         let catalog_proof=match attempt.prepared.kind {
             AttemptKind::Insert=> {
-                let source=metadata::read(&spool)?;held.check()?;
+                let mut source=metadata::read(&spool)?;held.check()?;
+                // The spool's own name is no title: a source without a title
+                // tag takes its library file's name, or none without one.
+                match &retained.source {
+                    Some(path) => source.named_after(path),
+                    None => source.file_title = None,
+                }
                 let (album,artist)=insert_groups(&attempt.prepared.operation)?;
                 let mut planner=Planner::new(&retained.before,&BTreeSet::new());
                 let planned=planner.plan(&source,CandidateIds {track:attempt.prepared.content.track_pid,album:Some(album),artist:Some(artist)})?;

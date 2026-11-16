@@ -709,3 +709,36 @@ fn pictures_and_an_encoder_tag_come_back_from_the_stored_form() {
     });
     assert_eq!(Source::from_stored(&mp3.to_stored().unwrap()).unwrap(), mp3);
 }
+
+/// A source without a title tag takes its file name; a title tag wins, and a
+/// tagged source keeps the shape earlier versions stored.
+#[test]
+fn a_source_without_a_title_tag_takes_its_file_name() {
+    let t = Temp::new();
+    let untitled = t
+        .read(&tagged(
+            vec![
+                frame("TPE1", b"\x03Artist", 4),
+                frame("TALB", b"\x03Album", 4),
+            ],
+            4,
+        ))
+        .unwrap();
+    assert_eq!(untitled.metadata.file_title.as_deref(), Some("test"));
+    assert_eq!(projection::project(&untitled).unwrap().title, "test");
+    let titled = t
+        .read(&tagged(vec![frame("TIT2", b"\x03Track", 4)], 4))
+        .unwrap();
+    assert_eq!(titled.metadata.file_title, None);
+    assert!(
+        serde_json::to_value(&titled.metadata)
+            .unwrap()
+            .get("file_title")
+            .is_none()
+    );
+    // A read stored without the field reads back as one without a name.
+    let mut stored = serde_json::to_value(&untitled.metadata).unwrap();
+    stored.as_object_mut().unwrap().remove("file_title");
+    let back: Tags = serde_json::from_value(stored).unwrap();
+    assert_eq!(back.file_title, None);
+}

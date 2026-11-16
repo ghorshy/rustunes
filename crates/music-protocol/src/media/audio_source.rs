@@ -123,10 +123,12 @@ pub(crate) fn front_cover(bytes: &[u8], expected: &Source) -> Result<Option<Embe
     let mut file = Cursor::new(bytes);
     let layout = container::inspect(&mut file, size)?
         .context("the source is no longer a supported format")?;
-    ensure!(
-        read_layout(&mut file, size, layout.clone())? == *expected,
-        "the source's inspection differs"
-    );
+    let mut read = read_layout(&mut file, size, layout.clone())?;
+    // The bytes hold no file name.
+    read.metadata
+        .file_title
+        .clone_from(&expected.metadata.file_title);
+    ensure!(read == *expected, "the source's inspection differs");
     let chosen = crate::media::mpeg::cover_index(&expected.artwork);
     let (mut front, mut at) = (None, 0);
     read_pictures(&mut file, &layout, &mut |facts, image| {
