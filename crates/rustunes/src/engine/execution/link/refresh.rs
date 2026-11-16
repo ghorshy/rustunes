@@ -14,6 +14,11 @@
 //! after one logged `lastUpdate=31.91s ago`, and that earlier refresh still
 //! stalled the port 3 s later. So a partial refresh leaves only what is left
 //! of the last full one's window to wait.
+//!
+//! The gathering line does not always come: on 2026-11-16 a link opened 223 s
+//! after a full refresh got only the disk-usage line within five seconds, and
+//! the port did not stall. The phone starts a full refresh only when the last
+//! one is over 600 s old, so a younger `lastUpdate` alone names a partial one.
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -28,6 +33,9 @@ const SYSLOG_START: Duration = Duration::from_secs(5);
 /// How long after the link opened atc's two lines may take to be read. They
 /// come during the handshake, so the relay holds them already.
 const VERDICT_WINDOW: Duration = Duration::from_secs(5);
+/// Below this `lastUpdate` the refresh is partial even when no gathering line
+/// says so: the phone's threshold is 600 s, less a margin.
+const PARTIAL_BELOW: Duration = Duration::from_secs(540);
 
 /// The refresh a link's opening started.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,6 +73,14 @@ impl Verdict {
         } else {
             Refresh::Full
         })
+    }
+
+    /// The refresh once no gathering line came: partial when the last full
+    /// one is young enough that the phone starts none, else unknown.
+    pub(crate) fn without_gathering(&self) -> Option<Refresh> {
+        self.since_full
+            .filter(|since_full| *since_full < PARTIAL_BELOW)
+            .map(|since_full| Refresh::Partial { since_full })
     }
 }
 
@@ -121,7 +137,9 @@ impl Syslog {
     }
 
     /// Read what atc said about the link that just opened, at most
-    /// `VERDICT_WINDOW`. None when the relay ended or atc did not say.
+    /// `VERDICT_WINDOW`. Without a gathering line by then, a young
+    /// `lastUpdate` still names a partial refresh; None when atc said nothing
+    /// that decides it.
     pub(crate) async fn verdict(mut self, control: &Control) -> (Option<Refresh>, Verdict) {
         let deadline = control.deadline.min(Instant::now() + VERDICT_WINDOW);
         let mut verdict = Verdict::default();
@@ -130,7 +148,7 @@ impl Syslog {
                 return (Some(refresh), verdict);
             }
         }
-        (None, verdict)
+        (verdict.without_gathering(), verdict)
     }
 }
 

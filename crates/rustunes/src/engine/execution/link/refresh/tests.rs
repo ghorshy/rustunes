@@ -102,3 +102,31 @@ fn a_line_with_the_device_name_is_read_the_same() {
         })
     );
 }
+
+/// 2026-11-16 23:42:33: a link opened 223 s after a full refresh got only the
+/// disk-usage line, and the port did not stall.
+#[test]
+fn a_young_last_update_without_a_gathering_line_is_a_partial_refresh() {
+    let after = |seconds: &str| {
+        let mut verdict = Verdict::default();
+        assert_eq!(verdict.feed(&sending(seconds)), None);
+        verdict.without_gathering()
+    };
+    assert_eq!(
+        after("223.32"),
+        Some(Refresh::Partial {
+            since_full: Duration::from_secs_f64(223.32)
+        })
+    );
+    assert_eq!(
+        after("539.99"),
+        Some(Refresh::Partial {
+            since_full: Duration::from_secs_f64(539.99)
+        })
+    );
+    // Near or past the phone's 600 s threshold a full refresh may start.
+    assert_eq!(after("540.00"), None);
+    assert_eq!(after("816561530.19"), None);
+    // Nothing from atc decides nothing.
+    assert_eq!(Verdict::default().without_gathering(), None);
+}
