@@ -44,6 +44,19 @@ pub enum ExpectedSource<'a> {
     },
 }
 
+impl ExpectedInsert<'_> {
+    /// The album artist group the track must join: none for a source with
+    /// neither an artist nor an album artist, which the phone files under no
+    /// album artist and whose artist PID it makes no group for (variant A,
+    /// 2026-11-16). A source that does not project fails its own checks.
+    pub fn album_artist_id(&self) -> Option<u64> {
+        match self.metadata.projected() {
+            Ok(s) if s.effective_artist().is_empty() => None,
+            _ => Some(self.artist_id),
+        }
+    }
+}
+
 impl<'a> From<&'a Metadata> for ExpectedSource<'a> {
     fn from(metadata: &'a Metadata) -> Self {
         Self::Alac(metadata)
@@ -326,7 +339,7 @@ fn verify_insert_with_policy(
         .copied()
         .collect::<BTreeSet<_>>();
     let expected_artists = old_artists
-        .union(&BTreeSet::from([expected.artist_id]))
+        .union(&expected.album_artist_id().into_iter().collect())
         .copied()
         .collect::<BTreeSet<_>>();
     ensure!(
@@ -384,7 +397,8 @@ fn verify_insert_with_policy(
                     &declared.album_artists
                 )
                 && new.live_track_count
-                    == old.live_track_count + usize::from(old.sync_id == expected.artist_id),
+                    == old.live_track_count
+                        + usize::from(Some(old.sync_id) == expected.album_artist_id()),
             "prior artist changed outside the expected track membership increment"
         );
     }
@@ -676,7 +690,7 @@ fn check_inserted(
     ensure!(
         track.sync_id == expected.track_id
             && track.album_sync_id == expected.album_id
-            && track.artist_sync_id == Some(expected.artist_id),
+            && track.artist_sync_id == expected.album_artist_id(),
         "inserted track/group identities differ from the plan"
     );
     ensure!(
@@ -806,10 +820,15 @@ fn sort_kept_or_sent(
         (Some(old), _) => ensure!(new == old, "prior {what} changed its sort name"),
         // The phone drops a byte order mark (U+FEFF) a sent name held when
         // it makes the sort name (seen on iOS 27.2).
+        // The phone stores no sort name for an album sent with an empty one
+        // (variant A, 2026-11-16).
         (None, Some(Some(sorts))) => ensure!(
-            new.as_deref().is_some_and(|sort| sorts
-                .iter()
-                .any(|sent_sort| *sent_sort == sort || sent_sort.replace('\u{feff}', "") == sort)),
+            match new.as_deref() {
+                Some(sort) => sorts.iter().any(|sent_sort| {
+                    *sent_sort == sort || sent_sort.replace('\u{feff}', "") == sort
+                }),
+                None => sorts.contains(""),
+            },
             "new {what} sort name differs from what was sent"
         ),
         (None, None) => {}
@@ -1357,7 +1376,7 @@ fn verify_batch(
         if locationless.contains(&target.track_id) {
             ensure!(
                 track.album_sync_id == target.album_id
-                    && track.artist_sync_id == Some(target.artist_id)
+                    && track.artist_sync_id == target.album_artist_id()
                     && track.afc_path.is_none(),
                 "locationless track {:016x} differs from its planned row",
                 target.track_id
@@ -1378,37 +1397,40 @@ fn verify_batch(
     case_renamed.extend(composer_renames);
     let located: BTreeSet<u64> = present.difference(locationless).copied().collect();
     verify_presentation(before, after, expected, &presented, &located)?;
-    let count = |pick: fn(&ExpectedInsert<'_>) -> u64, id: u64| {
+    let count = |pick: fn(&ExpectedInsert<'_>) -> Option<u64>, id: u64| {
         expected
             .iter()
-            .filter(|e| !removed.contains(&e.track_id) && pick(e) == id)
+            .filter(|e| !removed.contains(&e.track_id) && pick(e) == Some(id))
             .count()
     };
+    let album: fn(&ExpectedInsert<'_>) -> Option<u64> = |e| Some(e.album_id);
+    let artist: fn(&ExpectedInsert<'_>) -> Option<u64> = |e| e.album_artist_id();
     let old_albums: BTreeSet<_> = before.albums().values().map(|a| a.sync_id).collect();
     let old_artists: BTreeSet<_> = before.artists().values().map(|a| a.sync_id).collect();
     let after_albums: BTreeSet<_> = after.albums().values().map(|a| a.sync_id).collect();
     let after_artists: BTreeSet<_> = after.artists().values().map(|a| a.sync_id).collect();
     // Groups of present targets must exist; those planned only for removed
     // targets may.
-    let grouped = |pick: fn(&ExpectedInsert<'_>) -> u64, kept: bool| -> BTreeSet<u64> {
+    let grouped = |pick: fn(&ExpectedInsert<'_>) -> Option<u64>, kept: bool| -> BTreeSet<u64> {
         expected
             .iter()
             .filter(|e| !kept || !removed.contains(&e.track_id))
-            .map(pick)
+            .filter_map(pick)
             .collect()
     };
-    let within =
-        |after: &BTreeSet<u64>, old: &BTreeSet<u64>, pick: fn(&ExpectedInsert<'_>) -> u64| {
-            let kept: BTreeSet<u64> = old.union(&grouped(pick, true)).copied().collect();
-            let planned: BTreeSet<u64> = old.union(&grouped(pick, false)).copied().collect();
-            kept.is_subset(after) && after.is_subset(&planned)
-        };
+    let within = |after: &BTreeSet<u64>,
+                  old: &BTreeSet<u64>,
+                  pick: fn(&ExpectedInsert<'_>) -> Option<u64>| {
+        let kept: BTreeSet<u64> = old.union(&grouped(pick, true)).copied().collect();
+        let planned: BTreeSet<u64> = old.union(&grouped(pick, false)).copied().collect();
+        kept.is_subset(after) && after.is_subset(&planned)
+    };
     ensure!(
-        within(&after_albums, &old_albums, |e| e.album_id),
+        within(&after_albums, &old_albums, album),
         "post-transfer album identities differ from the planned grouping"
     );
     ensure!(
-        within(&after_artists, &old_artists, |e| e.artist_id),
+        within(&after_artists, &old_artists, artist),
         "post-transfer artist identities differ from the planned grouping"
     );
     for (id, old) in before.albums() {
@@ -1427,15 +1449,14 @@ fn verify_batch(
                 && old.artist_sync_id == new.artist_sync_id
                 && old.all_compilations == new.all_compilations
                 && compilation_members_kept(old, new)
-                && new.live_track_count
-                    == old.live_track_count + count(|e| e.album_id, old.sync_id),
+                && new.live_track_count == old.live_track_count + count(album, old.sync_id),
             "prior album changed outside the expected track membership increment"
         );
     }
     for new in after.albums().values() {
         if !old_albums.contains(&new.sync_id) {
             ensure!(
-                new.live_track_count == count(|e| e.album_id, new.sync_id),
+                new.live_track_count == count(album, new.sync_id),
                 "new album membership differs from the batch"
             );
         }
@@ -1455,15 +1476,14 @@ fn verify_batch(
                     &new.name,
                     &declared.album_artists
                 )
-                && new.live_track_count
-                    == old.live_track_count + count(|e| e.artist_id, old.sync_id),
+                && new.live_track_count == old.live_track_count + count(artist, old.sync_id),
             "prior artist changed outside the expected track membership increment"
         );
     }
     for new in after.artists().values() {
         if !old_artists.contains(&new.sync_id) {
             ensure!(
-                new.live_track_count == count(|e| e.artist_id, new.sync_id),
+                new.live_track_count == count(artist, new.sync_id),
                 "new artist membership differs from the batch"
             );
         }
@@ -2148,6 +2168,84 @@ mod tests {
         // The phone may space the prior track's sort keys out again.
         let spaced = "UPDATE item SET composer_order=composer_order*3+5 WHERE item_pid=1";
         verify_insert_batch(&before, &compilation_state_at(2, 13, spaced), &expected).unwrap();
+    }
+
+    /// Two tracks without an artist or album in one session, as variant A
+    /// left them (2026-11-16): no album_artist or item_artist row, and one
+    /// album row each under no album artist, both with the planned album's
+    /// sync_id and no sort name.
+    fn artistless_state(members: u32, change: &str) -> Catalog {
+        let mut sql = String::new();
+        for (member, letter) in (0..members).zip(["A", "B"]) {
+            let pid = 2 + member;
+            sql.push_str(&format!(
+                "INSERT INTO album VALUES({album},9000,'',0,0,NULL);
+                INSERT INTO item VALUES({pid},8,{album},0,0,0,0,51,0,0,1,0,0);
+                INSERT INTO item_extra VALUES({pid},'Untagged {letter}','NEW{letter}.m4a',50.0,1000,0,0,0,NULL,0,0,NULL,NULL);
+                INSERT INTO item_store VALUES({pid},{track});
+                INSERT INTO item_state VALUES({pid},0,1,1,1);
+                INSERT INTO item_stats VALUES({pid},0,0,0,0,0,0,0,0);",
+                album = 131 + member,
+                track = 10000 + member,
+            ));
+        }
+        sql.push_str(change);
+        crate::test_support::catalogue::modified_collection_catalog(12 + members.min(1), &sql)
+    }
+
+    fn artistless_source(letter: &str) -> Metadata {
+        let mut source = compilation_source(letter, false);
+        source.title = vec![format!("Untagged {letter}")];
+        source.artist.clear();
+        source.album.clear();
+        source.album_artist.clear();
+        source.compilation = None;
+        source
+    }
+
+    #[test]
+    fn tracks_without_an_artist_verify_under_no_album_artist() {
+        let before = artistless_state(0, "");
+        let a = artistless_source("A");
+        let b = artistless_source("B");
+        let expected = |source, first| ExpectedInsert {
+            path: if first {
+                "iTunes_Control/Music/F39/NEWA.m4a"
+            } else {
+                "iTunes_Control/Music/F39/NEWB.m4a"
+            },
+            ..compilation_expected(source, first)
+        };
+        let both = [expected(&a, true), expected(&b, false)];
+        assert_eq!(both[0].album_artist_id(), None);
+        let after = artistless_state(2, "");
+        let checked = verify_insert_batch(&before, &after, &both).unwrap();
+        assert_eq!(checked.new_albums, ["0000000000002328"]);
+        assert!(checked.new_artists.is_empty());
+        verify_insert(&before, &artistless_state(1, ""), &both[0]).unwrap();
+        // The phone filing the track under an album artist after all refuses.
+        let grouped = artistless_state(
+            2,
+            "INSERT INTO album_artist VALUES(121,8000,'',NULL);
+            DELETE FROM album WHERE album_pid=132;
+            UPDATE album SET album_artist_pid=121 WHERE album_pid=131;
+            UPDATE item SET album_pid=131, album_artist_pid=121 WHERE item_pid>1;",
+        );
+        assert!(verify_insert_batch(&before, &grouped, &both).is_err());
+        // A source with an artist still expects its group.
+        let named = compilation_source("A", false);
+        assert_eq!(expected(&named, true).album_artist_id(), Some(8000));
+        assert!(verify_insert(&before, &artistless_state(1, ""), &expected(&named, true)).is_err());
+    }
+
+    /// The phone stores no sort name for an album sent with an empty one.
+    #[test]
+    fn a_new_group_sent_an_empty_sort_name_may_store_none() {
+        let empty = Some(BTreeSet::from([""]));
+        assert!(sort_kept_or_sent("album", None, &None, Some(&empty)).is_ok());
+        assert!(sort_kept_or_sent("album", None, &Some(String::new()), Some(&empty)).is_ok());
+        let named = Some(BTreeSet::from(["Name"]));
+        assert!(sort_kept_or_sent("album", None, &None, Some(&named)).is_err());
     }
 
     #[test]

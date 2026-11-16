@@ -2833,7 +2833,8 @@ fn planned_groups(
         .flatten()
         .collect();
     for e in expected {
-        for id in [e.album_id, e.artist_id] {
+        // A track without an artist joins no album artist group.
+        for id in std::iter::once(e.album_id).chain(e.album_artist_id()) {
             ensure!(
                 created.contains(&id) || before.represented_sync_ids().contains(&id),
                 "track {:016x} joined an unplanned collection {id:016x}",
